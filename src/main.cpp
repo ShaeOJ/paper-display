@@ -16,6 +16,8 @@
 #include <functional>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <LittleFS.h>
 #include <WiFiManager.h>          // tzapu/WiFiManager
@@ -388,6 +390,12 @@ void drawStatsView(const Dev& d) {
     snprintf(b, sizeof(b), "%d J/TH", effJTH(d.st));  cell(RX, ry[1], ic16_leaf,   b);
     snprintf(b, sizeof(b), "%d MHz", d.st.frequency); cell(LX, ry[2], ic16_wave,   b);
     cell(RX, ry[2], ic16_clock, fmtUptime(d.st.uptimeSeconds));
+
+    // footer: the device's own config URL (web UI)
+    display.setFont(NULL); display.setTextSize(1);
+    String u = "cfg " + WiFi.localIP().toString();
+    display.setCursor((display.width() - (int)u.length() * 6) / 2, 121);
+    display.print(u);
   }, true);
 }
 
@@ -535,6 +543,87 @@ void drawCurrent() {
   if (sub == 0) drawGraphView(devs[dev]); else drawStatsView(devs[dev]);
 }
 
+// ---- web config UI -------------------------------------------------------
+// A small HTTP server on the device's LAN IP (and http://paper-display.local/)
+// to add/remove devices, see status, reconfigure WiFi, or reboot.
+ESP8266WebServer server(80);
+bool openPortalReq = false;
+
+String webPage() {
+  String h = F("<!doctype html><html><head><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>A.S.I.C. Miner Display</title><style>"
+    "body{font-family:system-ui,sans-serif;background:#0b1d16;color:#eafff2;margin:0;padding:16px}"
+    "h1{font-size:20px;color:#3ddc84;margin:.2em 0}"
+    ".card{background:#0f2a1f;border:1px solid #1e7a4d;border-radius:10px;padding:14px;margin:12px 0}"
+    "input[type=text]{width:100%;padding:9px;border-radius:6px;border:1px solid #1e7a4d;"
+    "background:#06120d;color:#eafff2;box-sizing:border-box;font-size:15px}"
+    "button{background:#3ddc84;color:#052915;border:0;border-radius:6px;padding:10px 14px;"
+    "font-weight:700;margin-top:10px;cursor:pointer;font-size:15px}"
+    ".b2{background:#1e7a4d;color:#eafff2}.muted{color:#7fd8a6;font-size:13px}"
+    ".on{color:#3ddc84}.off{color:#ff8a8a}.row{margin:4px 0}</style></head><body>");
+  h += F("<h1>&#9883; A.S.I.C. Miner Display</h1>");
+  h += "<div class=card><b>WiFi:</b> " + WiFi.SSID() +
+       "<br><span class=muted>" + WiFi.localIP().toString() + " &middot; " +
+       String(WiFi.RSSI()) + " dBm</span></div>";
+  h += F("<div class=card><form method=POST action=/save><b>Bitaxe IPs</b> "
+         "<span class=muted>(comma-separated, up to 6)</span><br>");
+  h += "<input type=text name=ips value='" + String(ipList) + "'>";
+  h += F("<button type=submit>Save devices</button></form>");
+  for (int i = 0; i < devCount; i++) {
+    Dev& d = devs[i];
+    h += "<div class=row>" + (d.st.hostname.length() ? d.st.hostname : String(d.ip)) + " &middot; ";
+    if (d.st.valid) h += "<span class=on>" + fmtHash(d.st.hashRate) + " &middot; " +
+                         String(d.st.temp, 0) + "C</span>";
+    else            h += "<span class=off>offline</span>";
+    h += " <span class=muted>(" + String(d.ip) + ")</span></div>";
+  }
+  h += F("</div>");
+  h += F("<div class=card><b>WiFi settings</b><br>"
+         "<span class=muted>Opens the setup hotspot to change WiFi.</span><br>"
+         "<form method=POST action=/wifi onsubmit=\"return confirm('Open WiFi setup AP? "
+         "This page drops until you reconnect.')\">"
+         "<button class=b2 type=submit>Reconfigure WiFi</button></form>"
+         "<form method=POST action=/reboot style=display:inline>"
+         "<button class=b2 type=submit>Reboot</button></form></div>");
+  h += F("</body></html>");
+  return h;
+}
+
+void handleRoot()  { server.send(200, "text/html", webPage()); }
+void handleSave() {
+  if (server.hasArg("ips")) {
+    String v = server.arg("ips"); v.trim();
+    strlcpy(ipList, v.c_str(), sizeof(ipList));
+    parseDevices(ipList);
+    saveConfig();
+    screen = 0; pollAll();
+  }
+  server.sendHeader("Location", "/");
+  server.send(303, "text/plain", "saved");
+  drawCurrent();
+}
+void handleWifi() {
+  server.send(200, "text/html",
+    "<meta http-equiv=refresh content='3;url=/'>Opening WiFi setup AP "
+    "<b>paper-display</b> - join it to change WiFi.");
+  openPortalReq = true;                 // handled in loop() (portal blocks)
+}
+void handleReboot() {
+  server.send(200, "text/html", "<meta http-equiv=refresh content='6;url=/'>Rebooting...");
+  delay(200); ESP.restart();
+}
+void setupWeb() {
+  server.on("/",       HTTP_GET,  handleRoot);
+  server.on("/save",   HTTP_POST, handleSave);
+  server.on("/wifi",   HTTP_POST, handleWifi);
+  server.on("/reboot", HTTP_POST, handleReboot);
+  server.begin();
+  if (MDNS.begin("paper-display")) MDNS.addService("http", "tcp", 80);
+  Serial.printf("[paper-display] web UI: http://%s/  (http://paper-display.local/)\n",
+                WiFi.localIP().toString().c_str());
+}
+
 // ---- setup / loop --------------------------------------------------------
 void startPortal(bool onDemand) {
   WiFiManager wm;
@@ -571,6 +660,7 @@ void setup() {
   Serial.printf("[paper-display] wifi=%s ip=%s devices=%d\n",
                 WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), devCount);
 
+  setupWeb();                          // LAN config UI
   pollAll();
   drawCurrent();                       // first screen
 }
@@ -602,6 +692,14 @@ void handleSerial() {
 uint32_t lastPoll = 0;
 void loop() {
   handleSerial();
+  server.handleClient();
+  MDNS.update();
+  if (openPortalReq) {                  // /wifi requested: open portal (blocks)
+    openPortalReq = false;
+    startPortal(true);
+    server.begin(); MDNS.begin("paper-display");   // re-listen after reconnect
+    pollAll(); drawCurrent();
+  }
   if (millis() - lastPoll >= POLL_MS || lastPoll == 0) {
     lastPoll = millis();
     int ok = pollAll();

@@ -47,6 +47,15 @@ On first boot (or if WiFi fails) it opens a captive-portal AP named **`paper-dis
 3. Enter one or more **Bitaxe IPs, comma-separated** (e.g. `10.0.0.42, 10.0.0.43`).
 4. Save — settings persist in LittleFS; it reconnects automatically after.
 
+## Web config UI
+After setup, the display runs a small web UI on its LAN IP (shown as `cfg <ip>`
+on the stats screen) and at **http://paper-display.local/**. From there you can:
+
+- add / remove Bitaxe IPs
+- see each device's live status (hashrate, temp, online/offline)
+- **Reconfigure WiFi** (reopens the `paper-display` setup hotspot)
+- reboot
+
 ## Multiple devices
 Enter several IPs (comma-separated, up to 6). With more than one device the display
 shows a **fleet overview** (each device's name, hashrate, temp) and then rotates
