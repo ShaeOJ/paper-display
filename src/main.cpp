@@ -576,7 +576,12 @@ String webPage() {
     if (d.st.valid) h += "<span class=on>" + fmtHash(d.st.hashRate) + " &middot; " +
                          String(d.st.temp, 0) + "C</span>";
     else            h += "<span class=off>offline</span>";
-    h += " <span class=muted>(" + String(d.ip) + ")</span></div>";
+    h += " <span class=muted>(" + String(d.ip) + ")</span>";
+    h += "<form method=POST action=/remove style=display:inline "
+         "onsubmit=\"return confirm('Remove " + String(d.ip) + "?')\">"
+         "<input type=hidden name=ip value='" + String(d.ip) + "'>"
+         "<button class=b2 style='padding:2px 8px;margin-left:8px;font-size:12px'>&times;</button>"
+         "</form></div>";
   }
   h += F("</div>");
   h += F("<div class=card><b>WiFi settings</b><br>"
@@ -603,6 +608,24 @@ void handleSave() {
   server.send(303, "text/plain", "saved");
   drawCurrent();
 }
+void handleRemove() {
+  if (server.hasArg("ip")) {
+    String target = server.arg("ip");
+    String rebuilt = "";
+    for (int i = 0; i < devCount; i++) {
+      if (String(devs[i].ip) == target) continue;    // drop the matching device
+      if (rebuilt.length()) rebuilt += ",";
+      rebuilt += devs[i].ip;
+    }
+    strlcpy(ipList, rebuilt.c_str(), sizeof(ipList));
+    parseDevices(ipList);
+    saveConfig();
+    screen = 0; pollAll();
+  }
+  server.sendHeader("Location", "/");
+  server.send(303, "text/plain", "removed");
+  drawCurrent();
+}
 void handleWifi() {
   server.send(200, "text/html",
     "<meta http-equiv=refresh content='3;url=/'>Opening WiFi setup AP "
@@ -616,6 +639,7 @@ void handleReboot() {
 void setupWeb() {
   server.on("/",       HTTP_GET,  handleRoot);
   server.on("/save",   HTTP_POST, handleSave);
+  server.on("/remove", HTTP_POST, handleRemove);
   server.on("/wifi",   HTTP_POST, handleWifi);
   server.on("/reboot", HTTP_POST, handleReboot);
   server.begin();
