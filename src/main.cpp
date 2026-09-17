@@ -40,7 +40,7 @@ GxEPD2_BW<GxEPD2_290_T94_V2, GxEPD2_290_T94_V2::HEIGHT>
 
 // ---- config --------------------------------------------------------------
 static const char* CFG_PATH   = "/config.json";
-static const uint32_t POLL_MS = 60000;          // poll + refresh cadence
+static const uint32_t POLL_MS = 30000;          // poll + view-flip cadence
 char bitaxeIp[40] = "";
 bool shouldSaveConfig = false;
 
@@ -173,13 +173,8 @@ void drawMessage(const char* title, const char* line1, const char* line2) {
   }, true);
 }
 
-// e-paper has no ghost-free fast mode: full refresh = zero ghost but a brief
-// blink; partial = blink-free but ghosts. Ghost-free wins here, so full refresh
-// every update and a slower poll (60s, see POLL_MS) keeps the blink infrequent.
-// Set FULL_EVERY > 1 to make most updates fast partial (blink-free) if you'd
-// rather trade a little ghosting for no blink.
-static const int FULL_EVERY = 1;
-int drawCount = 0;
+// The display alternates two views every poll; each swap changes the whole
+// screen so a full (ghost-free) refresh is always used.
 
 // Short label for a hashrate value on the Y axis (e.g. "512" GH, "1.2T").
 String chartVal(float gh) {
@@ -259,69 +254,83 @@ void drawChart(int ax, int ay, int aw, int ah) {
   }
 }
 
-// 8x8 monochrome stat icons (MSB = leftmost pixel).
-static const uint8_t ic_thermo[] PROGMEM = {  // temp
-  0b00011000, 0b00100100, 0b00100100, 0b00100100,
-  0b00111100, 0b01111110, 0b01111110, 0b00111100 };
-static const uint8_t ic_chip[]   PROGMEM = {  // VR temp
-  0b00100100, 0b01111110, 0b11111111, 0b10111101,
-  0b10111101, 0b11111111, 0b01111110, 0b00100100 };
-static const uint8_t ic_bolt[]   PROGMEM = {  // power
-  0b00011100, 0b00110000, 0b01100000, 0b01111100,
-  0b00001100, 0b00011000, 0b00110000, 0b01100000 };
-static const uint8_t ic_leaf[]   PROGMEM = {  // efficiency
-  0b00000110, 0b00011110, 0b00111110, 0b01111100,
-  0b11111000, 0b01110000, 0b00101000, 0b00000100 };
-static const uint8_t ic_wave[]   PROGMEM = {  // frequency
-  0b00000000, 0b00000000, 0b01100110, 0b10011001,
-  0b00000000, 0b01100110, 0b10011001, 0b00000000 };
-static const uint8_t ic_check[]  PROGMEM = {  // shares
+// --- stat icons -------------------------------------------------------------
+// Hand-drawn 16x16 icons for the big stats view (2 bytes/row, MSB = leftmost).
+static const uint8_t ic16_thermo[] PROGMEM = {
+  0x03,0xC0, 0x02,0x40, 0x02,0x40, 0x02,0x40, 0x02,0x40, 0x03,0xC0, 0x03,0xC0, 0x03,0xC0,
+  0x03,0xC0, 0x07,0xE0, 0x0F,0xF0, 0x0F,0xF0, 0x0F,0xF0, 0x0F,0xF0, 0x07,0xE0, 0x03,0xC0 };
+static const uint8_t ic16_bolt[] PROGMEM = {
+  0x00,0x00, 0x01,0xF0, 0x03,0xE0, 0x07,0xC0, 0x0F,0x80, 0x1F,0xF8, 0x0F,0xF0, 0x01,0xF0,
+  0x03,0xE0, 0x07,0xC0, 0x0F,0x80, 0x1F,0x00, 0x3E,0x00, 0x3C,0x00, 0x00,0x00, 0x00,0x00 };
+static const uint8_t ic16_chip[] PROGMEM = {
+  0x00,0x00, 0x00,0x00, 0x00,0x00, 0x1F,0xF8, 0x10,0x08, 0x90,0x09, 0x10,0x08, 0x90,0x09,
+  0x10,0x08, 0x90,0x09, 0x10,0x08, 0x90,0x09, 0x10,0x08, 0x1F,0xF8, 0x00,0x00, 0x00,0x00 };
+static const uint8_t ic16_leaf[] PROGMEM = {
+  0x00,0x00, 0x00,0x00, 0x00,0x0C, 0x00,0x3C, 0x00,0x7C, 0x00,0xFC, 0x01,0xDC, 0x03,0xB8,
+  0x07,0x70, 0x0E,0xE0, 0x1D,0xC0, 0x3B,0x00, 0x74,0x00, 0xE0,0x00, 0x80,0x00, 0x00,0x00 };
+static const uint8_t ic16_wave[] PROGMEM = {
+  0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x20,0x20, 0x70,0x70, 0x50,0x50,
+  0x88,0x88, 0x88,0x88, 0x05,0x05, 0x0E,0x0E, 0x02,0x02, 0x00,0x00, 0x00,0x00, 0x00,0x00 };
+static const uint8_t ic16_clock[] PROGMEM = {
+  0x00,0x00, 0x03,0xC0, 0x0C,0x30, 0x10,0x08, 0x20,0x04, 0x20,0x04, 0x40,0x02, 0x41,0x02,
+  0x41,0x82, 0x40,0xE2, 0x20,0x04, 0x20,0x04, 0x10,0x08, 0x0C,0x30, 0x03,0xC0, 0x00,0x00 };
+
+// 8x8 icons for the graph view's shares/best strip.
+static const uint8_t ic_check[] PROGMEM = {
   0b00000000, 0b00000011, 0b00000110, 0b00001100,
   0b11011000, 0b01110000, 0b00100000, 0b00000000 };
-static const uint8_t ic_star[]   PROGMEM = {  // best diff
+static const uint8_t ic_star[] PROGMEM = {
   0b00011000, 0b00011000, 0b11111111, 0b01111110,
   0b00111100, 0b01100110, 0b01000010, 0b00000000 };
-static const uint8_t ic_clock[]  PROGMEM = {  // uptime
-  0b00111100, 0b01000010, 0b10010001, 0b10011001,
-  0b10001101, 0b10000001, 0b01000010, 0b00111100 };
 
-void drawStats() {
-  bool full = (drawCount % FULL_EVERY == 0);
-  drawCount++;
+// Shared header (both views): current hashrate (left) + RSSI dBm (right).
+void drawHeader() {
+  const int W = display.width();
+  char b[16];
+  display.setFont(&FreeSansBold9pt7b);
+  display.setCursor(4, 14); display.print(fmtHash(st.hashRate));
+  snprintf(b, sizeof(b), "%d dBm", st.rssi);
+  display.setFont(&FreeSans9pt7b);
+  display.setCursor(W - textW(b) - 4, 14); display.print(b);
+  display.drawFastHLine(0, 18, W, GxEPD_BLACK);
+}
+
+// View A: header + large hashrate chart + shares / best-diff strip.
+void drawGraphView() {
   renderFrame([&]() {
-    const int W = display.width();     // 296
-    char b[28];
-
-    // --- header: current hashrate (left) + RSSI (right) ---
-    display.setFont(&FreeSansBold9pt7b);
-    display.setCursor(4, 14); display.print(fmtHash(st.hashRate));
-    snprintf(b, sizeof(b), "%d dBm", st.rssi);
-    display.setFont(&FreeSans9pt7b);
-    display.setCursor(W - textW(b) - 4, 14); display.print(b);
-
-    // --- hashrate chart with X/Y gridlines + labels ---
-    drawChart(2, 20, W - 4, 46);       // area y20..66 (plot + axis labels)
-
-    // --- compact stats grid: 8x8 icon + value, 2 columns x 4 rows ---
+    const int W = display.width();
+    char b[24];
+    drawHeader();
+    drawChart(2, 20, W - 4, 82);       // big graph, y20..102
     display.setFont(NULL);
     display.setTextSize(1);
-    const int LX = 4, RX = 152;
-    const int ys[4] = {74, 88, 102, 116};
-    auto row = [&](int x, int y, const uint8_t* ic, const String& val) {
-      display.drawBitmap(x, y, ic, 8, 8, GxEPD_BLACK);
-      display.setCursor(x + 11, y); display.print(val);
-    };
+    display.drawBitmap(4, 114, ic_check, 8, 8, GxEPD_BLACK);
+    snprintf(b, sizeof(b), "%ld/%ld", st.sharesAccepted, st.sharesRejected);
+    display.setCursor(15, 114); display.print(b);
+    display.drawBitmap(150, 114, ic_star, 8, 8, GxEPD_BLACK);
+    display.setCursor(161, 114); display.print("Best " + fmtDiff(st.bestDiff));
+  }, true);
+}
 
-    snprintf(b, sizeof(b), "%.1fC", st.temp);        row(LX, ys[0], ic_thermo, b);
-    snprintf(b, sizeof(b), "%.1fW", st.power);       row(RX, ys[0], ic_bolt,   b);
-    snprintf(b, sizeof(b), "%.0fC", st.vrTemp);      row(LX, ys[1], ic_chip,   b);
-    snprintf(b, sizeof(b), "%d J/TH", effJTH());     row(RX, ys[1], ic_leaf,   b);
-    snprintf(b, sizeof(b), "%dMHz", st.frequency);   row(LX, ys[2], ic_wave,   b);
-    snprintf(b, sizeof(b), "%ld/%ld",
-             st.sharesAccepted, st.sharesRejected);  row(RX, ys[2], ic_check,  b);
-    row(LX, ys[3], ic_star,  fmtDiff(st.bestDiff));
-    row(RX, ys[3], ic_clock, fmtUptime(st.uptimeSeconds));
-  }, full);
+// View B: header + big-icon stats grid (2 columns x 3 rows).
+void drawStatsView() {
+  renderFrame([&]() {
+    char b[16];
+    drawHeader();
+    display.setFont(&FreeSans9pt7b);
+    const int LX = 8, RX = 156;
+    const int ry[3] = {26, 60, 94};    // icon top y for each row
+    auto cell = [&](int x, int y, const uint8_t* ic, const String& val) {
+      display.drawBitmap(x, y, ic, 16, 16, GxEPD_BLACK);
+      display.setCursor(x + 22, y + 12); display.print(val);
+    };
+    snprintf(b, sizeof(b), "%.1f C", st.temp);      cell(LX, ry[0], ic16_thermo, b);
+    snprintf(b, sizeof(b), "%.1f W", st.power);     cell(RX, ry[0], ic16_bolt,   b);
+    snprintf(b, sizeof(b), "%.0f C", st.vrTemp);    cell(LX, ry[1], ic16_chip,   b);
+    snprintf(b, sizeof(b), "%d J/TH", effJTH());    cell(RX, ry[1], ic16_leaf,   b);
+    snprintf(b, sizeof(b), "%d MHz", st.frequency); cell(LX, ry[2], ic16_wave,   b);
+    cell(RX, ry[2], ic16_clock, fmtUptime(st.uptimeSeconds));
+  }, true);
 }
 
 // ---- Bitaxe poll ---------------------------------------------------------
@@ -392,16 +401,18 @@ void setup() {
   Serial.printf("[paper-display] wifi=%s ip=%s bitaxe=%s\n",
                 WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), bitaxeIp);
 
-  if (fetchStats()) drawStats();
+  if (fetchStats()) drawGraphView();
   else drawMessage("Bitaxe offline", bitaxeIp, "retrying...");
 }
 
 uint32_t lastPoll = 0;
+int view = 0;                          // 0 = graph, 1 = stats
 void loop() {
   if (millis() - lastPoll >= POLL_MS || lastPoll == 0) {
     lastPoll = millis();
     if (fetchStats()) {
-      drawStats();
+      if (view == 0) drawGraphView(); else drawStatsView();
+      view ^= 1;                       // flip view each poll
       Serial.printf("[paper-display] %.1f GH/s  %.1fC  %.1fW\n",
                     st.hashRate, st.temp, st.power);
     } else if (!st.valid) {
