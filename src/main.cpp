@@ -427,6 +427,47 @@ void drawOverview() {
   }, true);
 }
 
+// A.S.I.C. atom mark: 3 rotated orbit ellipses + a chip nucleus.
+void drawAtom(int cx, int cy, int R) {
+  for (int o = 0; o < 3; o++) {
+    float ang = o * PI / 3.0f, ca = cosf(ang), sa = sinf(ang);
+    float a = R, b = R * 0.42f;
+    int lx = -9999, ly = 0;
+    for (int t = 0; t <= 360; t += 10) {
+      float r = t * PI / 180.0f;
+      float ex = a * cosf(r), ey = b * sinf(r);
+      int x = cx + (int)(ex * ca - ey * sa);
+      int y = cy + (int)(ex * sa + ey * ca);
+      if (lx != -9999) display.drawLine(lx, ly, x, y, GxEPD_BLACK);
+      lx = x; ly = y;
+    }
+  }
+  display.fillRect(cx - 4, cy - 4, 9, 9, GxEPD_BLACK);        // chip nucleus
+  for (int i = -3; i <= 3; i += 3) {                          // chip legs
+    display.drawPixel(cx + i, cy - 6, GxEPD_BLACK);
+    display.drawPixel(cx + i, cy + 6, GxEPD_BLACK);
+  }
+}
+
+// Setup / WiFi-config screen: atom logo + how to connect and configure.
+void drawSetup() {
+  renderFrame([&]() {
+    drawAtom(40, 66, 28);
+    display.setFont(&FreeSansBold12pt7b);
+    display.setCursor(84, 20); display.print("A.S.I.C.");
+    display.setFont(&FreeSans9pt7b);
+    display.setCursor(84, 40); display.print("Miner Display");
+    display.setFont(&FreeSansBold9pt7b);
+    display.setCursor(84, 66); display.print("1. Join WiFi");
+    display.setFont(&FreeSans9pt7b);
+    display.setCursor(98, 84); display.print("paper-display");
+    display.setFont(&FreeSansBold9pt7b);
+    display.setCursor(84, 108); display.print("2. Open");
+    display.setFont(&FreeSans9pt7b);
+    display.setCursor(150, 108); display.print("192.168.4.1");
+  }, true);
+}
+
 // ---- Bitaxe poll ---------------------------------------------------------
 bool fetchStats(int idx) {
   Dev& d = devs[idx];
@@ -469,17 +510,28 @@ int pollAll() {
   return n;
 }
 
-// Screen rotation: [overview] then each device's [graph][stats].
+// Screen rotation, driven by RESPONDING devices only (so an offline or extra
+// device never produces empty panels): overview (only when >1 responding) then
+// each responding device's [graph][stats]. One device = just its two pages.
 int screen = 0;
 void drawCurrent() {
   if (devCount == 0) { drawMessage("No devices", "add IPs in", "paper-display AP"); return; }
-  bool multi = devCount > 1;
-  int total = multi ? (1 + 2 * devCount) : 2;
+
+  int valid[MAX_DEV], vc = 0;
+  for (int i = 0; i < devCount; i++) if (devs[i].st.valid) valid[vc++] = i;
+
+  if (vc == 0) {                       // nothing responding
+    drawMessage("Offline", devCount == 1 ? devs[0].ip : "all devices", "check IP / power");
+    return;
+  }
+
+  bool multi = vc > 1;
+  int total = multi ? (1 + 2 * vc) : 2;
   int s = screen % total;
   if (multi && s == 0) { drawOverview(); return; }
   int idx = multi ? s - 1 : s;
-  int dev = idx / 2, sub = idx % 2;
-  if (dev >= devCount) dev = 0;
+  int dev = valid[idx / 2];
+  int sub = idx % 2;
   if (sub == 0) drawGraphView(devs[dev]); else drawStatsView(devs[dev]);
 }
 
@@ -487,6 +539,7 @@ void drawCurrent() {
 void startPortal(bool onDemand) {
   WiFiManager wm;
   wm.setSaveConfigCallback(onSaveConfig);
+  wm.setAPCallback([](WiFiManager*) { drawSetup(); });   // show setup screen when portal opens
   WiFiManagerParameter pIp("bitaxe", "Bitaxe IPs (comma-separated)", ipList, sizeof(ipList) - 1);
   wm.addParameter(&pIp);
   wm.setConfigPortalTimeout(180);
@@ -511,10 +564,8 @@ void setup() {
   loadConfig();
   parseDevices(ipList);
 
-  // If no devices configured yet, show setup hint before opening the portal.
-  if (devCount == 0) {
-    drawMessage("Setup needed", "Join WiFi AP:", "paper-display");
-  }
+  // No devices yet -> show the setup screen (also shown when the portal opens).
+  if (devCount == 0) drawSetup();
   startPortal(false);                  // autoConnect: uses saved creds or portal
 
   Serial.printf("[paper-display] wifi=%s ip=%s devices=%d\n",
