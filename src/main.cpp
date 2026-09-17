@@ -19,6 +19,7 @@
 #include <ArduinoJson.h>          // v6
 
 #include <GxEPD2_BW.h>
+#include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 
@@ -60,13 +61,18 @@ struct Stats {
   int      rssi = 0;
 } st;
 
-// Rolling hashrate history for the sparkline (one sample per poll).
+// Rolling history for the chart: hashrate + temperature (one sample per poll).
 static const int HIST = 180;
-float hist[HIST];
+float hist[HIST];       // hashrate GH/s
+float thist[HIST];      // temp C (dotted overlay)
 int   histCount = 0;
-void pushHist(float v) {
-  if (histCount < HIST) hist[histCount++] = v;
-  else { memmove(hist, hist + 1, (HIST - 1) * sizeof(float)); hist[HIST - 1] = v; }
+void pushSample(float hr, float t) {
+  if (histCount < HIST) { hist[histCount] = hr; thist[histCount] = t; histCount++; }
+  else {
+    memmove(hist,  hist  + 1, (HIST - 1) * sizeof(float));
+    memmove(thist, thist + 1, (HIST - 1) * sizeof(float));
+    hist[HIST - 1] = hr; thist[HIST - 1] = t;
+  }
 }
 
 // ---- persistence ---------------------------------------------------------
@@ -245,9 +251,20 @@ void drawChart(int ax, int ay, int aw, int ah) {
     display.print(lab);
   }
 
-  // the smoothed hashrate line
   if (histCount >= 2) {
     auto X = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
+
+    // dotted temperature overlay (own auto-range -> secondary scale)
+    float tmn = thist[0], tmx = thist[0];
+    for (int i = 1; i < histCount; i++) { tmn = min(tmn, thist[i]); tmx = max(tmx, thist[i]); }
+    float tpad = max((tmx - tmn) * 0.20f, 1.0f);
+    float tlo = tmn - tpad, thi = tmx + tpad;
+    for (int i = 0; i < histCount; i++) {
+      int ty = baseY - (int)((thist[i] - tlo) / (thi - tlo) * (ph - 1));
+      display.drawPixel(X(i), ty, GxEPD_BLACK);           // dots = dotted temp line
+    }
+
+    // solid smoothed hashrate line
     auto Y = [&](int i) { return baseY - (int)((smooth(i) - lo) / (hi - lo) * (ph - 1)); };
     for (int i = 1; i < histCount; i++)
       display.drawLine(X(i - 1), Y(i - 1), X(i), Y(i), GxEPD_BLACK);
@@ -265,9 +282,9 @@ static const uint8_t ic16_bolt[] PROGMEM = {
 static const uint8_t ic16_chip[] PROGMEM = {
   0x00,0x00, 0x00,0x00, 0x00,0x00, 0x1F,0xF8, 0x10,0x08, 0x90,0x09, 0x10,0x08, 0x90,0x09,
   0x10,0x08, 0x90,0x09, 0x10,0x08, 0x90,0x09, 0x10,0x08, 0x1F,0xF8, 0x00,0x00, 0x00,0x00 };
-static const uint8_t ic16_leaf[] PROGMEM = {
-  0x00,0x00, 0x00,0x00, 0x00,0x0C, 0x00,0x3C, 0x00,0x7C, 0x00,0xFC, 0x01,0xDC, 0x03,0xB8,
-  0x07,0x70, 0x0E,0xE0, 0x1D,0xC0, 0x3B,0x00, 0x74,0x00, 0xE0,0x00, 0x80,0x00, 0x00,0x00 };
+static const uint8_t ic16_leaf[] PROGMEM = {   // almond leaf w/ center vein + stem
+  0x01,0x00, 0x02,0x80, 0x04,0x40, 0x09,0x20, 0x09,0x20, 0x11,0x10, 0x11,0x10, 0x11,0x10,
+  0x09,0x20, 0x09,0x20, 0x05,0x40, 0x04,0x40, 0x02,0x80, 0x01,0x00, 0x01,0x00, 0x01,0x00 };
 static const uint8_t ic16_wave[] PROGMEM = {
   0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x20,0x20, 0x70,0x70, 0x50,0x50,
   0x88,0x88, 0x88,0x88, 0x05,0x05, 0x0E,0x0E, 0x02,0x02, 0x00,0x00, 0x00,0x00, 0x00,0x00 };
@@ -283,32 +300,32 @@ static const uint8_t ic_star[] PROGMEM = {
   0b00011000, 0b00011000, 0b11111111, 0b01111110,
   0b00111100, 0b01100110, 0b01000010, 0b00000000 };
 
-// Shared header (both views): current hashrate (left) + RSSI dBm (right).
+// Shared header (both views): current hashrate (left, bold) + RSSI dBm (right).
 void drawHeader() {
   const int W = display.width();
   char b[16];
-  display.setFont(&FreeSansBold9pt7b);
-  display.setCursor(4, 14); display.print(fmtHash(st.hashRate));
+  display.setFont(&FreeSansBold12pt7b);
+  display.setCursor(4, 18); display.print(fmtHash(st.hashRate));
   snprintf(b, sizeof(b), "%d dBm", st.rssi);
   display.setFont(&FreeSans9pt7b);
-  display.setCursor(W - textW(b) - 4, 14); display.print(b);
-  display.drawFastHLine(0, 18, W, GxEPD_BLACK);
+  display.setCursor(W - textW(b) - 4, 16); display.print(b);
+  display.drawFastHLine(0, 22, W, GxEPD_BLACK);
 }
 
-// View A: header + large hashrate chart + shares / best-diff strip.
+// View A: header + hashrate chart (dotted temp overlay) + shares / best strip.
 void drawGraphView() {
   renderFrame([&]() {
     const int W = display.width();
     char b[24];
     drawHeader();
-    drawChart(2, 20, W - 4, 82);       // big graph, y20..102
+    drawChart(2, 24, W - 4, 72);       // slightly smaller graph, y24..96
     display.setFont(NULL);
     display.setTextSize(1);
-    display.drawBitmap(4, 114, ic_check, 8, 8, GxEPD_BLACK);
+    display.drawBitmap(4, 116, ic_check, 8, 8, GxEPD_BLACK);
     snprintf(b, sizeof(b), "%ld/%ld", st.sharesAccepted, st.sharesRejected);
-    display.setCursor(15, 114); display.print(b);
-    display.drawBitmap(150, 114, ic_star, 8, 8, GxEPD_BLACK);
-    display.setCursor(161, 114); display.print("Best " + fmtDiff(st.bestDiff));
+    display.setCursor(15, 116); display.print(b);
+    display.drawBitmap(150, 116, ic_star, 8, 8, GxEPD_BLACK);
+    display.setCursor(161, 116); display.print("Best " + fmtDiff(st.bestDiff));
   }, true);
 }
 
@@ -358,7 +375,7 @@ bool fetchStats() {
       st.uptimeSeconds  = doc["uptimeSeconds"].as<long>();
       st.rssi           = WiFi.RSSI();
       st.valid = true;
-      pushHist(st.hashRate);
+      pushSample(st.hashRate, st.temp);
       ok = true;
     }
   }
