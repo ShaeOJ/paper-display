@@ -193,9 +193,10 @@ String chartVal(float gh) {
 // Draw the hashrate history as a line chart with dynamic X (time) / Y (hashrate)
 // gridlines and axis labels inside the area [ax,ay,aw,ah].
 void drawChart(int ax, int ay, int aw, int ah) {
-  const int GUT  = 24;   // left gutter for Y (hashrate) labels
-  const int XLAB = 9;    // bottom strip for X (time) labels
-  const int px = ax + GUT, py = ay, pw = aw - GUT, ph = ah - XLAB;
+  const int GUT  = 24;   // left gutter: hashrate labels
+  const int RGUT = 22;   // right gutter: temp labels
+  const int XLAB = 9;    // bottom strip: time labels
+  const int px = ax + GUT, py = ay, pw = aw - GUT - RGUT, ph = ah - XLAB;
   const int baseY = py + ph, rightX = px + pw - 1;
   const int pollS = POLL_MS / 1000;
 
@@ -204,74 +205,78 @@ void drawChart(int ax, int ay, int aw, int ah) {
   auto dotH = [&](int x, int y, int w) { for (int i = 0; i < w; i += 3) display.drawPixel(x + i, y, GxEPD_BLACK); };
   auto dotV = [&](int x, int y, int h) { for (int i = 0; i < h; i += 3) display.drawPixel(x, y + i, GxEPD_BLACK); };
 
-  // axes
-  display.drawFastVLine(px, py, ph, GxEPD_BLACK);
+  // axes: left (hashrate), right (temp), bottom (time)
+  display.drawFastVLine(px,     py, ph, GxEPD_BLACK);
+  display.drawFastVLine(rightX, py, ph, GxEPD_BLACK);
   display.drawFastHLine(px, baseY, pw, GxEPD_BLACK);
 
-  // Smoothed sample (centered moving average) so the line rounds off spikes.
+  // 5-point moving average so the hashrate line rounds off spikes.
   auto smooth = [&](int i) -> float {
-    const int w = 2;                 // +/- 2 = 5-point average
+    const int w = 2;
     float s = 0; int n = 0;
     for (int j = i - w; j <= i + w; j++)
       if (j >= 0 && j < histCount) { s += hist[j]; n++; }
     return n ? s / n : hist[i];
   };
 
+  // hashrate range (left axis)
   float mn = 0, mx = 1;
   if (histCount >= 1) {
     mn = mx = smooth(0);
     for (int i = 1; i < histCount; i++) { float v = smooth(i); mn = min(mn, v); mx = max(mx, v); }
   }
-  // Pad the Y range so a flat / low-variation line floats mid-plot (never glued
-  // to the baseline axis where it would be invisible).
   float pad = max((mx - mn) * 0.20f, 2.0f);
   float lo = mn - pad, hi = mx + pad;
 
-  // Y gridlines + labels at min / mid / max
+  // temp range (right axis)
+  float tmn = 0, tmx = 1;
+  if (histCount >= 1) {
+    tmn = tmx = thist[0];
+    for (int i = 1; i < histCount; i++) { tmn = min(tmn, thist[i]); tmx = max(tmx, thist[i]); }
+  }
+  float tpad = max((tmx - tmn) * 0.20f, 1.0f);
+  float tlo = tmn - tpad, thi = tmx + tpad;
+
+  // Y gridlines + dual labels: hashrate (left), temp (right; top label marked C)
   for (int k = 0; k <= 2; k++) {
     float frac = k / 2.0f;
     int yy = baseY - (int)(frac * (ph - 1));
-    if (k > 0) dotH(px + 1, yy, pw - 1);
-    String lab = chartVal(lo + (hi - lo) * frac);
-    display.setCursor(px - 2 - lab.length() * 6, yy - 3);
-    display.print(lab);
+    if (k > 0) dotH(px + 1, yy, pw - 2);
+    String hl = chartVal(lo + (hi - lo) * frac);
+    display.setCursor(px - 2 - hl.length() * 6, yy - 3); display.print(hl);
+    char tl[8];
+    if (k == 2) snprintf(tl, sizeof(tl), "%.0fC", tlo + (thi - tlo) * frac);
+    else        snprintf(tl, sizeof(tl), "%.0f",  tlo + (thi - tlo) * frac);
+    display.setCursor(rightX + 3, yy - 3); display.print(tl);
   }
 
-  // X gridlines + time-ago labels at oldest / mid / now
+  // X mid gridline + time-ago labels (oldest / mid / now)
   int spanS = (histCount > 1) ? (histCount - 1) * pollS : 0;
   for (int k = 0; k <= 2; k++) {
-    float frac = k / 2.0f;                       // 0=oldest(left) .. 1=now(right)
+    float frac = k / 2.0f;
     int xx = px + (int)(frac * (pw - 1));
-    if (k < 2) dotV(xx, py, ph);
+    if (k == 1) dotV(xx, py, ph);
     int agoS = (int)((1.0f - frac) * spanS);
     String lab = (k == 2) ? String("now") : String("-") + String((agoS + 30) / 60) + "m";
     int lw = lab.length() * 6, lx = xx - lw / 2;
     lx = max(px, min(lx, rightX - lw));
-    display.setCursor(lx, baseY + 2);
-    display.print(lab);
+    display.setCursor(lx, baseY + 2); display.print(lab);
   }
 
   if (histCount >= 2) {
-    auto X = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
+    auto X  = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
+    auto TY = [&](int i) { return baseY - (int)((thist[i]  - tlo) / (thi - tlo) * (ph - 1)); };
+    auto HY = [&](int i) { return baseY - (int)((smooth(i) - lo ) / (hi  - lo ) * (ph - 1)); };
 
-    // dotted temperature overlay (own auto-range -> secondary scale)
-    float tmn = thist[0], tmx = thist[0];
-    for (int i = 1; i < histCount; i++) { tmn = min(tmn, thist[i]); tmx = max(tmx, thist[i]); }
-    float tpad = max((tmx - tmn) * 0.20f, 1.0f);
-    float tlo = tmn - tpad, thi = tmx + tpad;
-    auto TY = [&](int i) { return baseY - (int)((thist[i] - tlo) / (thi - tlo) * (ph - 1)); };
-    for (int i = 0; i < histCount; i += 3)                // sparse dots = temp line
-      display.drawPixel(X(i), TY(i), GxEPD_BLACK);
-    // degree-C marker at the temp line's current end
-    int lastTy = constrain(TY(histCount - 1), py + 5, baseY - 2);
-    display.setFont(NULL); display.setTextSize(1);
-    display.drawCircle(rightX - 9, lastTy - 4, 1, GxEPD_BLACK);   // degree ring
-    display.setCursor(rightX - 6, lastTy - 4); display.print("C");
-
-    // solid smoothed hashrate line
-    auto Y = [&](int i) { return baseY - (int)((smooth(i) - lo) / (hi - lo) * (ph - 1)); };
+    // thin temperature line (right-axis scale)
     for (int i = 1; i < histCount; i++)
-      display.drawLine(X(i - 1), Y(i - 1), X(i), Y(i), GxEPD_BLACK);
+      display.drawLine(X(i - 1), TY(i - 1), X(i), TY(i), GxEPD_BLACK);
+
+    // bold hashrate line (drawn twice, 1px offset = 2px thick)
+    for (int i = 1; i < histCount; i++) {
+      display.drawLine(X(i - 1), HY(i - 1),     X(i), HY(i),     GxEPD_BLACK);
+      display.drawLine(X(i - 1), HY(i - 1) - 1, X(i), HY(i) - 1, GxEPD_BLACK);
+    }
   }
 }
 
