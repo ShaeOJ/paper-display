@@ -259,10 +259,14 @@ void drawChart(int ax, int ay, int aw, int ah) {
     for (int i = 1; i < histCount; i++) { tmn = min(tmn, thist[i]); tmx = max(tmx, thist[i]); }
     float tpad = max((tmx - tmn) * 0.20f, 1.0f);
     float tlo = tmn - tpad, thi = tmx + tpad;
-    for (int i = 0; i < histCount; i++) {
-      int ty = baseY - (int)((thist[i] - tlo) / (thi - tlo) * (ph - 1));
-      display.drawPixel(X(i), ty, GxEPD_BLACK);           // dots = dotted temp line
-    }
+    auto TY = [&](int i) { return baseY - (int)((thist[i] - tlo) / (thi - tlo) * (ph - 1)); };
+    for (int i = 0; i < histCount; i += 3)                // sparse dots = temp line
+      display.drawPixel(X(i), TY(i), GxEPD_BLACK);
+    // degree-C marker at the temp line's current end
+    int lastTy = constrain(TY(histCount - 1), py + 5, baseY - 2);
+    display.setFont(NULL); display.setTextSize(1);
+    display.drawCircle(rightX - 9, lastTy - 4, 1, GxEPD_BLACK);   // degree ring
+    display.setCursor(rightX - 6, lastTy - 4); display.print("C");
 
     // solid smoothed hashrate line
     auto Y = [&](int i) { return baseY - (int)((smooth(i) - lo) / (hi - lo) * (ph - 1)); };
@@ -318,14 +322,14 @@ void drawGraphView() {
     const int W = display.width();
     char b[24];
     drawHeader();
-    drawChart(2, 24, W - 4, 72);       // slightly smaller graph, y24..96
+    drawChart(2, 32, W - 4, 74);       // graph pushed down from header, y32..106
     display.setFont(NULL);
     display.setTextSize(1);
-    display.drawBitmap(4, 116, ic_check, 8, 8, GxEPD_BLACK);
+    display.drawBitmap(4, 114, ic_check, 8, 8, GxEPD_BLACK);
     snprintf(b, sizeof(b), "%ld/%ld", st.sharesAccepted, st.sharesRejected);
-    display.setCursor(15, 116); display.print(b);
-    display.drawBitmap(150, 116, ic_star, 8, 8, GxEPD_BLACK);
-    display.setCursor(161, 116); display.print("Best " + fmtDiff(st.bestDiff));
+    display.setCursor(15, 114); display.print(b);
+    display.drawBitmap(150, 114, ic_star, 8, 8, GxEPD_BLACK);
+    display.setCursor(161, 114); display.print("Best " + fmtDiff(st.bestDiff));
   }, true);
 }
 
@@ -336,7 +340,7 @@ void drawStatsView() {
     drawHeader();
     display.setFont(&FreeSans9pt7b);
     const int LX = 8, RX = 156;
-    const int ry[3] = {26, 60, 94};    // icon top y for each row
+    const int ry[3] = {34, 68, 102};   // icon top y (pushed down from header)
     auto cell = [&](int x, int y, const uint8_t* ic, const String& val) {
       display.drawBitmap(x, y, ic, 16, 16, GxEPD_BLACK);
       display.setCursor(x + 22, y + 12); display.print(val);
