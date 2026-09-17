@@ -52,10 +52,11 @@ Enter several IPs (comma-separated, up to 6). With more than one device the disp
 shows a **fleet overview** (each device's name, hashrate, temp) and then rotates
 through each device's graph + stats pages.
 
-You can also set/replace the device list any time over **serial** (115200): type a
-comma-separated IP list and press enter, or type `portal` to reopen WiFi setup.
+You can also set/replace the device list any time over **serial** (115200) with an
+explicit command (the prefix prevents line-noise from corrupting the saved list):
 ```
-10.0.0.42,10.0.0.43,10.0.0.44
+ip 10.0.0.42,10.0.0.43,10.0.0.44     # set devices
+portal                                # reopen WiFi setup
 ```
 
 ## Notes

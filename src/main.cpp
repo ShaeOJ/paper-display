@@ -575,15 +575,24 @@ void setup() {
   drawCurrent();                       // first screen
 }
 
-// Serial config: type a comma-separated IP list (e.g. "10.0.0.231,10.0.0.240")
-// in the monitor to set devices on the fly; type "portal" to open WiFi setup.
+// Serial config. To avoid boot/line noise ever corrupting the saved config, a
+// command MUST be explicit: "ip 10.0.0.231,10.0.0.240" sets devices; "portal"
+// opens WiFi setup. Anything else is ignored.
 void handleSerial() {
   if (!Serial.available()) return;
   String line = Serial.readStringUntil('\n');
   line.trim();
   if (line.length() == 0) return;
   if (line.equalsIgnoreCase("portal")) { startPortal(true); return; }
-  strlcpy(ipList, line.c_str(), sizeof(ipList));
+  if (!line.startsWith("ip ")) return;                 // ignore noise / other input
+  String list = line.substring(3); list.trim();
+  // sanity: only digits, dots, commas, spaces
+  for (size_t i = 0; i < list.length(); i++) {
+    char c = list[i];
+    if (!((c >= '0' && c <= '9') || c == '.' || c == ',' || c == ' ')) return;
+  }
+  if (list.indexOf('.') < 0) return;
+  strlcpy(ipList, list.c_str(), sizeof(ipList));
   parseDevices(ipList);
   saveConfig();
   Serial.printf("[paper-display] set %d device(s): %s\n", devCount, ipList);
