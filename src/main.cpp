@@ -220,15 +220,18 @@ void drawChart(int ax, int ay, int aw, int ah) {
   if (histCount >= 1) {
     mn = mx = smooth(0);
     for (int i = 1; i < histCount; i++) { float v = smooth(i); mn = min(mn, v); mx = max(mx, v); }
-    if (mx - mn < 1.0f) { mx += 1.0f; }
   }
+  // Pad the Y range so a flat / low-variation line floats mid-plot (never glued
+  // to the baseline axis where it would be invisible).
+  float pad = max((mx - mn) * 0.20f, 2.0f);
+  float lo = mn - pad, hi = mx + pad;
 
   // Y gridlines + labels at min / mid / max
   for (int k = 0; k <= 2; k++) {
     float frac = k / 2.0f;
     int yy = baseY - (int)(frac * (ph - 1));
     if (k > 0) dotH(px + 1, yy, pw - 1);
-    String lab = chartVal(mn + (mx - mn) * frac);
+    String lab = chartVal(lo + (hi - lo) * frac);
     display.setCursor(px - 2 - lab.length() * 6, yy - 3);
     display.print(lab);
   }
@@ -250,7 +253,7 @@ void drawChart(int ax, int ay, int aw, int ah) {
   // the smoothed hashrate line
   if (histCount >= 2) {
     auto X = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
-    auto Y = [&](int i) { return baseY - (int)((smooth(i) - mn) / (mx - mn) * (ph - 1)); };
+    auto Y = [&](int i) { return baseY - (int)((smooth(i) - lo) / (hi - lo) * (ph - 1)); };
     for (int i = 1; i < histCount; i++)
       display.drawLine(X(i - 1), Y(i - 1), X(i), Y(i), GxEPD_BLACK);
   }
