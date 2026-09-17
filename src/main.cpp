@@ -19,7 +19,7 @@
 #include <ArduinoJson.h>          // v6
 
 #include <GxEPD2_BW.h>
-#include <Fonts/FreeSansBold18pt7b.h>
+#include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 
@@ -27,12 +27,17 @@
 #define EPD_CS   15
 #define EPD_DC    4
 #define EPD_RST   5
-#define EPD_BUSY 16
+// BUSY on GPIO16 reads as perpetually-busy on this board, so GxEPD2 would stall
+// the full 10s timeout every refresh. Setting BUSY=-1 makes GxEPD2 use short,
+// per-operation timed delays instead — no stall, smooth refresh. (Set back to 16
+// only if a board actually drives BUSY correctly.)
+#define EPD_BUSY -1
 
-// Panel class confirmed working on the Heltec 2.9" B/W. If you swap panels and
-// see a slow ~10s "Busy Timeout" per refresh, try GxEPD2_290_T94_V2 instead.
-GxEPD2_BW<GxEPD2_290_BS, GxEPD2_290_BS::HEIGHT>
-    display(GxEPD2_290_BS(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+// Heltec 2.9" panel = GDEM029T94 controller: use the T94_V2 class for fast
+// partial (flicker-free) refresh. If you see a blank/garbled screen or a slow
+// ~10s "Busy Timeout" per refresh, fall back to GxEPD2_290_BS.
+GxEPD2_BW<GxEPD2_290_T94_V2, GxEPD2_290_T94_V2::HEIGHT>
+    display(GxEPD2_290_T94_V2(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
 // ---- config --------------------------------------------------------------
 static const char* CFG_PATH   = "/config.json";
@@ -55,6 +60,15 @@ struct Stats {
   long     uptimeSeconds = 0;
   int      rssi = 0;
 } st;
+
+// Rolling hashrate history for the sparkline (one sample per poll).
+static const int HIST = 180;
+float hist[HIST];
+int   histCount = 0;
+void pushHist(float v) {
+  if (histCount < HIST) hist[histCount++] = v;
+  else { memmove(hist, hist + 1, (HIST - 1) * sizeof(float)); hist[HIST - 1] = v; }
+}
 
 // ---- persistence ---------------------------------------------------------
 void loadConfig() {
@@ -104,10 +118,43 @@ int effJTH() {
   return (int)lroundf(st.power / (st.hashRate / 1000.0f));
 }
 
+// Format a difficulty for display as a compact number with a K/M/G/T/P suffix.
+// AxeOS may return bestDiff already suffixed (e.g. "116M") or as a raw number;
+// handle both. A pre-suffixed string is returned uppercased as-is.
+String fmtDiff(const String& raw) {
+  if (raw.length() == 0) return String("0");
+  char last = raw[raw.length() - 1];
+  if (isalpha(last)) { String s = raw; s.toUpperCase(); return s; }
+  double v = raw.toDouble();
+  const char* suf[] = {"", "K", "M", "G", "T", "P"};
+  int i = 0;
+  while (v >= 1000.0 && i < 5) { v /= 1000.0; i++; }
+  char b[16];
+  if (v >= 100 || i == 0) snprintf(b, sizeof(b), "%.0f%s", v, suf[i]);
+  else                    snprintf(b, sizeof(b), "%.1f%s", v, suf[i]);
+  return String(b);
+}
+
+// Width of a string in the currently selected font.
+uint16_t textW(const String& s) {
+  int16_t x, y; uint16_t w, h;
+  display.getTextBounds(s, 0, 0, &x, &y, &w, &h);
+  return w;
+}
+
+// Trim a string (current font already set) until it fits within maxpx.
+String fitW(String s, uint16_t maxpx) {
+  while (s.length() > 1 && textW(s) > maxpx) s.remove(s.length() - 1);
+  return s;
+}
+
 // ---- rendering -----------------------------------------------------------
-// Draw a full frame with the given body-builder. Full-window update (no ghosting).
-void renderFrame(std::function<void()> body) {
-  display.setFullWindow();
+// Render with the given body-builder. `full`=true does a clean full-window
+// refresh (clears ghosting); `full`=false does a fast partial refresh (smooth,
+// no black flash) on panels that support it. A periodic full refresh de-ghosts.
+void renderFrame(std::function<void()> body, bool full) {
+  if (full) display.setFullWindow();
+  else      display.setPartialWindow(0, 0, display.width(), display.height());
   display.firstPage();
   do {
     display.fillScreen(GxEPD_WHITE);
@@ -124,45 +171,63 @@ void drawMessage(const char* title, const char* line1, const char* line2) {
     display.setFont(&FreeSans9pt7b);
     if (line1) { display.setCursor(12, 62);  display.print(line1); }
     if (line2) { display.setCursor(12, 90);  display.print(line2); }
-  });
+  }, true);
+}
+
+// e-paper partial refresh ghosts (old pixels remain faintly visible). Data only
+// changes once per poll, and a full refresh is now fast (~1s, BUSY disabled), so
+// full-refresh every update = crisp with no ghost. Raise FULL_EVERY (>1) to trade
+// a little ghosting for fewer full-refresh flashes.
+static const int FULL_EVERY = 1;
+int drawCount = 0;
+
+// Draw the hashrate sparkline within [gx,gy,gw,gh]; auto-ranged min..max.
+void drawSparkline(int gx, int gy, int gw, int gh) {
+  display.drawFastHLine(gx, gy + gh, gw, GxEPD_BLACK);   // baseline axis
+  if (histCount < 2) return;
+  float mn = hist[0], mx = hist[0];
+  for (int i = 1; i < histCount; i++) { mn = min(mn, hist[i]); mx = max(mx, hist[i]); }
+  if (mx - mn < 1.0f) { mx = mn + 1.0f; }                // flat -> avoid /0
+  auto px = [&](int i) { return gx + (histCount == 1 ? 0 : i * (gw - 1) / (histCount - 1)); };
+  auto py = [&](int i) { return gy + gh - 1 - (int)((hist[i] - mn) / (mx - mn) * (gh - 1)); };
+  for (int i = 1; i < histCount; i++)
+    display.drawLine(px(i - 1), py(i - 1), px(i), py(i), GxEPD_BLACK);
 }
 
 void drawStats() {
+  bool full = (drawCount % FULL_EVERY == 0);
+  drawCount++;
   renderFrame([&]() {
-    const int W = display.width();   // 296
-    // header: hostname + rssi
-    display.setFont(&FreeSansBold9pt7b);
-    display.setCursor(4, 15);
-    display.print(st.hostname.length() ? st.hostname : String("bitaxe"));
-    char rssi[10]; snprintf(rssi, sizeof(rssi), "%ddBm", st.rssi);
-    int16_t bx, by; uint16_t bw, bh;
-    display.getTextBounds(rssi, 0, 0, &bx, &by, &bw, &bh);
-    display.setFont(&FreeSans9pt7b);
-    display.setCursor(W - bw - 6, 15); display.print(rssi);
-    display.drawFastHLine(4, 20, W - 8, GxEPD_BLACK);
+    const int W = display.width();     // 296
+    char b[28];
 
-    // hashrate (big)
-    display.setFont(&FreeSansBold18pt7b);
-    String h = fmtHash(st.hashRate);
-    display.getTextBounds(h, 0, 0, &bx, &by, &bw, &bh);
-    display.setCursor((W - bw) / 2, 52); display.print(h);
-
-    // stat rows
+    // --- header: current hashrate (left, bold) + RSSI (right) ---
+    display.setFont(&FreeSansBold12pt7b);
+    display.setCursor(4, 17); display.print(fmtHash(st.hashRate));
+    snprintf(b, sizeof(b), "%d dBm", st.rssi);
     display.setFont(&FreeSans9pt7b);
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%.1fC   %.1fW   %d J/TH", st.temp, st.power, effJTH());
-    display.setCursor(6, 76);  display.print(buf);
-    snprintf(buf, sizeof(buf), "%dMHz   VR %.0fC", st.frequency, st.vrTemp);
-    display.setCursor(6, 96);  display.print(buf);
-    snprintf(buf, sizeof(buf), "A:%ld R:%ld  Best %s",
-             st.sharesAccepted, st.sharesRejected, st.bestDiff.c_str());
-    display.setCursor(6, 116); display.print(buf);
+    display.setCursor(W - textW(b) - 4, 15); display.print(b);
 
-    // footer: uptime
-    display.drawFastHLine(4, 120, W - 8, GxEPD_BLACK);
-    display.setFont(&FreeSans9pt7b);
-    display.setCursor(6, 126); display.print("up " + fmtUptime(st.uptimeSeconds));
-  });
+    // --- sparkline (hashrate history) ---
+    drawSparkline(3, 22, W - 6, 44);   // y 22..66
+
+    // --- compact stats grid: tiny built-in font, 2 columns x 4 rows ---
+    display.setFont(NULL);
+    display.setTextSize(1);
+    const int LX = 4, RX = 152;
+    const int ys[4] = {78, 90, 102, 114};
+    auto cell = [&](int x, int y, const String& s) { display.setCursor(x, y); display.print(s); };
+
+    snprintf(b, sizeof(b), "Temp %.1fC", st.temp);       cell(LX, ys[0], b);
+    snprintf(b, sizeof(b), "Pwr  %.1fW", st.power);      cell(RX, ys[0], b);
+    snprintf(b, sizeof(b), "VR   %.0fC", st.vrTemp);     cell(LX, ys[1], b);
+    snprintf(b, sizeof(b), "Eff  %d J/TH", effJTH());    cell(RX, ys[1], b);
+    snprintf(b, sizeof(b), "Freq %dMHz", st.frequency);  cell(LX, ys[2], b);
+    snprintf(b, sizeof(b), "A/R  %ld/%ld",
+             st.sharesAccepted, st.sharesRejected);      cell(RX, ys[2], b);
+    cell(LX, ys[3], "Best " + fmtDiff(st.bestDiff));
+    cell(RX, ys[3], "Up   " + fmtUptime(st.uptimeSeconds));
+  }, full);
 }
 
 // ---- Bitaxe poll ---------------------------------------------------------
@@ -190,6 +255,7 @@ bool fetchStats() {
       st.uptimeSeconds  = doc["uptimeSeconds"].as<long>();
       st.rssi           = WiFi.RSSI();
       st.valid = true;
+      pushHist(st.hashRate);
       ok = true;
     }
   }
