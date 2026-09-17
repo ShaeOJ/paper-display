@@ -44,8 +44,19 @@ On first boot (or if WiFi fails) it opens a captive-portal AP named **`paper-dis
 
 1. Join the `paper-display` WiFi network from your phone/PC.
 2. Pick your WiFi and enter the password.
-3. Enter your **Bitaxe IP** (e.g. `10.0.0.42`) in the extra field.
+3. Enter one or more **Bitaxe IPs, comma-separated** (e.g. `10.0.0.42, 10.0.0.43`).
 4. Save — settings persist in LittleFS; it reconnects automatically after.
+
+## Multiple devices
+Enter several IPs (comma-separated, up to 6). With more than one device the display
+shows a **fleet overview** (each device's name, hashrate, temp) and then rotates
+through each device's graph + stats pages.
+
+You can also set/replace the device list any time over **serial** (115200): type a
+comma-separated IP list and press enter, or type `portal` to reopen WiFi setup.
+```
+10.0.0.42,10.0.0.43,10.0.0.44
+```
 
 ## Notes
 - Full-window refresh every 30 s (no ghosting). e-paper only redraws on the poll

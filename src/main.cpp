@@ -5,7 +5,10 @@
 // e-paper on the Waveshare e-Paper ESP8266 Driver Board.
 //
 // First boot (or if WiFi fails) opens a captive-portal AP named "paper-display":
-// join it, pick your WiFi, and enter the Bitaxe IP. Settings persist in LittleFS.
+// join it, pick your WiFi, and enter one or more Bitaxe IPs (comma-separated).
+// You can also set/replace the IP list any time over serial (see handleSerial).
+// With >1 device it shows a fleet overview then rotates each device's detail.
+// Settings persist in LittleFS.
 //
 // Driver-board pin map (fixed by the PCB): BUSY=16 RST=5 DC=4 CS=15 SCK=14 MOSI=13.
 
@@ -41,8 +44,9 @@ GxEPD2_BW<GxEPD2_290_T94_V2, GxEPD2_290_T94_V2::HEIGHT>
 
 // ---- config --------------------------------------------------------------
 static const char* CFG_PATH   = "/config.json";
-static const uint32_t POLL_MS = 30000;          // poll + view-flip cadence
-char bitaxeIp[40] = "";
+static const uint32_t POLL_MS = 30000;          // poll + screen-flip cadence
+static const int MAX_DEV = 6;
+char ipList[200] = "";                           // raw comma-separated IPs (portal field)
 bool shouldSaveConfig = false;
 
 // ---- live stats ----------------------------------------------------------
@@ -59,19 +63,45 @@ struct Stats {
   String   bestDiff;         // AxeOS returns this as a string, e.g. "116M"
   long     uptimeSeconds = 0;
   int      rssi = 0;
-} st;
+};
 
-// Rolling history for the chart: hashrate + temperature (one sample per poll).
+// One monitored device: IP, latest stats, and rolling chart history.
 static const int HIST = 180;
-float hist[HIST];       // hashrate GH/s
-float thist[HIST];      // temp C (dotted overlay)
-int   histCount = 0;
-void pushSample(float hr, float t) {
-  if (histCount < HIST) { hist[histCount] = hr; thist[histCount] = t; histCount++; }
+struct Dev {
+  char  ip[24] = "";
+  Stats st;
+  float hist[HIST];          // hashrate GH/s history
+  float thist[HIST];         // temp C history
+  int   histCount = 0;
+};
+Dev devs[MAX_DEV];
+int  devCount = 0;
+
+void pushSample(Dev& d, float hr, float t) {
+  if (d.histCount < HIST) { d.hist[d.histCount] = hr; d.thist[d.histCount] = t; d.histCount++; }
   else {
-    memmove(hist,  hist  + 1, (HIST - 1) * sizeof(float));
-    memmove(thist, thist + 1, (HIST - 1) * sizeof(float));
-    hist[HIST - 1] = hr; thist[HIST - 1] = t;
+    memmove(d.hist,  d.hist  + 1, (HIST - 1) * sizeof(float));
+    memmove(d.thist, d.thist + 1, (HIST - 1) * sizeof(float));
+    d.hist[HIST - 1] = hr; d.thist[HIST - 1] = t;
+  }
+}
+
+// Parse a comma-separated IP string into the device list.
+void parseDevices(const char* csv) {
+  devCount = 0;
+  String s(csv);
+  int start = 0;
+  while (start <= (int)s.length() && devCount < MAX_DEV) {
+    int c = s.indexOf(',', start);
+    if (c < 0) c = s.length();
+    String tok = s.substring(start, c); tok.trim();
+    if (tok.length()) {
+      Dev& d = devs[devCount];
+      strlcpy(d.ip, tok.c_str(), sizeof(d.ip));
+      d.histCount = 0; d.st = Stats();
+      devCount++;
+    }
+    start = c + 1;
   }
 }
 
@@ -80,9 +110,11 @@ void loadConfig() {
   if (!LittleFS.begin()) { LittleFS.format(); LittleFS.begin(); }
   File f = LittleFS.open(CFG_PATH, "r");
   if (!f) return;
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<512> doc;
   if (!deserializeJson(doc, f)) {
-    strlcpy(bitaxeIp, doc["bitaxeIp"] | "", sizeof(bitaxeIp));
+    const char* list = doc["bitaxeIps"] | "";        // new: comma-separated list
+    if (strlen(list) == 0) list = doc["bitaxeIp"] | ""; // legacy: single IP
+    strlcpy(ipList, list, sizeof(ipList));
   }
   f.close();
 }
@@ -90,8 +122,8 @@ void loadConfig() {
 void saveConfig() {
   File f = LittleFS.open(CFG_PATH, "w");
   if (!f) return;
-  StaticJsonDocument<256> doc;
-  doc["bitaxeIp"] = bitaxeIp;
+  StaticJsonDocument<512> doc;
+  doc["bitaxeIps"] = ipList;
   serializeJson(doc, f);
   f.close();
 }
@@ -118,9 +150,9 @@ String fmtUptime(long s) {
 }
 
 // efficiency in J/TH = watts / (GH/s / 1000)
-int effJTH() {
-  if (st.hashRate <= 0) return 0;
-  return (int)lroundf(st.power / (st.hashRate / 1000.0f));
+int effJTH(const Stats& s) {
+  if (s.hashRate <= 0) return 0;
+  return (int)lroundf(s.power / (s.hashRate / 1000.0f));
 }
 
 // Format a difficulty for display as a compact number with a K/M/G/T/P suffix.
@@ -192,7 +224,7 @@ String chartVal(float gh) {
 
 // Draw the hashrate history as a line chart with dynamic X (time) / Y (hashrate)
 // gridlines and axis labels inside the area [ax,ay,aw,ah].
-void drawChart(int ax, int ay, int aw, int ah) {
+void drawChart(const Dev& d, int ax, int ay, int aw, int ah) {
   const int GUT  = 24;   // left gutter: hashrate labels
   const int RGUT = 22;   // right gutter: temp labels
   const int XLAB = 9;    // bottom strip: time labels
@@ -215,24 +247,24 @@ void drawChart(int ax, int ay, int aw, int ah) {
     const int w = 2;
     float s = 0; int n = 0;
     for (int j = i - w; j <= i + w; j++)
-      if (j >= 0 && j < histCount) { s += hist[j]; n++; }
-    return n ? s / n : hist[i];
+      if (j >= 0 && j < d.histCount) { s += d.hist[j]; n++; }
+    return n ? s / n : d.hist[i];
   };
 
   // hashrate range (left axis)
   float mn = 0, mx = 1;
-  if (histCount >= 1) {
+  if (d.histCount >= 1) {
     mn = mx = smooth(0);
-    for (int i = 1; i < histCount; i++) { float v = smooth(i); mn = min(mn, v); mx = max(mx, v); }
+    for (int i = 1; i < d.histCount; i++) { float v = smooth(i); mn = min(mn, v); mx = max(mx, v); }
   }
   float pad = max((mx - mn) * 0.20f, 2.0f);
   float lo = mn - pad, hi = mx + pad;
 
   // temp range (right axis)
   float tmn = 0, tmx = 1;
-  if (histCount >= 1) {
-    tmn = tmx = thist[0];
-    for (int i = 1; i < histCount; i++) { tmn = min(tmn, thist[i]); tmx = max(tmx, thist[i]); }
+  if (d.histCount >= 1) {
+    tmn = tmx = d.thist[0];
+    for (int i = 1; i < d.histCount; i++) { tmn = min(tmn, d.thist[i]); tmx = max(tmx, d.thist[i]); }
   }
   float tpad = max((tmx - tmn) * 0.20f, 1.0f);
   float tlo = tmn - tpad, thi = tmx + tpad;
@@ -251,7 +283,7 @@ void drawChart(int ax, int ay, int aw, int ah) {
   }
 
   // X mid gridline + time-ago labels (oldest / mid / now)
-  int spanS = (histCount > 1) ? (histCount - 1) * pollS : 0;
+  int spanS = (d.histCount > 1) ? (d.histCount - 1) * pollS : 0;
   for (int k = 0; k <= 2; k++) {
     float frac = k / 2.0f;
     int xx = px + (int)(frac * (pw - 1));
@@ -263,17 +295,17 @@ void drawChart(int ax, int ay, int aw, int ah) {
     display.setCursor(lx, baseY + 2); display.print(lab);
   }
 
-  if (histCount >= 2) {
-    auto X  = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
-    auto TY = [&](int i) { return baseY - (int)((thist[i]  - tlo) / (thi - tlo) * (ph - 1)); };
-    auto HY = [&](int i) { return baseY - (int)((smooth(i) - lo ) / (hi  - lo ) * (ph - 1)); };
+  if (d.histCount >= 2) {
+    auto X  = [&](int i) { return px + i * (pw - 1) / (d.histCount - 1); };
+    auto TY = [&](int i) { return baseY - (int)((d.thist[i] - tlo) / (thi - tlo) * (ph - 1)); };
+    auto HY = [&](int i) { return baseY - (int)((smooth(i)  - lo ) / (hi  - lo ) * (ph - 1)); };
 
     // thin temperature line (right-axis scale)
-    for (int i = 1; i < histCount; i++)
+    for (int i = 1; i < d.histCount; i++)
       display.drawLine(X(i - 1), TY(i - 1), X(i), TY(i), GxEPD_BLACK);
 
     // bold hashrate line (drawn twice, 1px offset = 2px thick)
-    for (int i = 1; i < histCount; i++) {
+    for (int i = 1; i < d.histCount; i++) {
       display.drawLine(X(i - 1), HY(i - 1),     X(i), HY(i),     GxEPD_BLACK);
       display.drawLine(X(i - 1), HY(i - 1) - 1, X(i), HY(i) - 1, GxEPD_BLACK);
     }
@@ -309,100 +341,160 @@ static const uint8_t ic_star[] PROGMEM = {
   0b00011000, 0b00011000, 0b11111111, 0b01111110,
   0b00111100, 0b01100110, 0b01000010, 0b00000000 };
 
-// Shared header (both views): current hashrate (left, bold) + RSSI dBm (right).
-void drawHeader() {
+// Per-device header: current hashrate (left, bold) + device name (right).
+void drawHeader(const Dev& d) {
   const int W = display.width();
-  char b[16];
   display.setFont(&FreeSansBold12pt7b);
-  display.setCursor(4, 18); display.print(fmtHash(st.hashRate));
-  snprintf(b, sizeof(b), "%d dBm", st.rssi);
+  display.setCursor(4, 18); display.print(fmtHash(d.st.hashRate));
   display.setFont(&FreeSans9pt7b);
-  display.setCursor(W - textW(b) - 4, 16); display.print(b);
+  String nm = d.st.hostname.length() ? d.st.hostname : String(d.ip);
+  nm = fitW(nm, 120);
+  display.setCursor(W - textW(nm) - 4, 16); display.print(nm);
   display.drawFastHLine(0, 22, W, GxEPD_BLACK);
 }
 
-// View A: header + hashrate chart (dotted temp overlay) + shares / best strip.
-void drawGraphView() {
+// View A: header + dual-axis chart + shares / best strip (one device).
+void drawGraphView(const Dev& d) {
   renderFrame([&]() {
     const int W = display.width();
     char b[24];
-    drawHeader();
-    drawChart(2, 32, W - 4, 74);       // graph pushed down from header, y32..106
+    drawHeader(d);
+    drawChart(d, 2, 32, W - 4, 74);
     display.setFont(NULL);
     display.setTextSize(1);
     display.drawBitmap(4, 114, ic_check, 8, 8, GxEPD_BLACK);
-    snprintf(b, sizeof(b), "%ld/%ld", st.sharesAccepted, st.sharesRejected);
+    snprintf(b, sizeof(b), "%ld/%ld", d.st.sharesAccepted, d.st.sharesRejected);
     display.setCursor(15, 114); display.print(b);
     display.drawBitmap(150, 114, ic_star, 8, 8, GxEPD_BLACK);
-    display.setCursor(161, 114); display.print("Best " + fmtDiff(st.bestDiff));
+    display.setCursor(161, 114); display.print("Best " + fmtDiff(d.st.bestDiff));
   }, true);
 }
 
-// View B: header + big-icon stats grid (2 columns x 3 rows).
-void drawStatsView() {
+// View B: header + big-icon stats grid (one device).
+void drawStatsView(const Dev& d) {
   renderFrame([&]() {
     char b[16];
-    drawHeader();
+    drawHeader(d);
     display.setFont(&FreeSans9pt7b);
     const int LX = 8, RX = 156;
-    const int ry[3] = {34, 68, 102};   // icon top y (pushed down from header)
+    const int ry[3] = {34, 68, 102};
     auto cell = [&](int x, int y, const uint8_t* ic, const String& val) {
       display.drawBitmap(x, y, ic, 16, 16, GxEPD_BLACK);
       display.setCursor(x + 22, y + 12); display.print(val);
     };
-    snprintf(b, sizeof(b), "%.1f C", st.temp);      cell(LX, ry[0], ic16_thermo, b);
-    snprintf(b, sizeof(b), "%.1f W", st.power);     cell(RX, ry[0], ic16_bolt,   b);
-    snprintf(b, sizeof(b), "%.0f C", st.vrTemp);    cell(LX, ry[1], ic16_chip,   b);
-    snprintf(b, sizeof(b), "%d J/TH", effJTH());    cell(RX, ry[1], ic16_leaf,   b);
-    snprintf(b, sizeof(b), "%d MHz", st.frequency); cell(LX, ry[2], ic16_wave,   b);
-    cell(RX, ry[2], ic16_clock, fmtUptime(st.uptimeSeconds));
+    snprintf(b, sizeof(b), "%.1f C", d.st.temp);      cell(LX, ry[0], ic16_thermo, b);
+    snprintf(b, sizeof(b), "%.1f W", d.st.power);     cell(RX, ry[0], ic16_bolt,   b);
+    snprintf(b, sizeof(b), "%.0f C", d.st.vrTemp);    cell(LX, ry[1], ic16_chip,   b);
+    snprintf(b, sizeof(b), "%d J/TH", effJTH(d.st));  cell(RX, ry[1], ic16_leaf,   b);
+    snprintf(b, sizeof(b), "%d MHz", d.st.frequency); cell(LX, ry[2], ic16_wave,   b);
+    cell(RX, ry[2], ic16_clock, fmtUptime(d.st.uptimeSeconds));
+  }, true);
+}
+
+// Fleet overview: total hashrate + per-device list (name, hashrate, temp).
+void drawOverview() {
+  renderFrame([&]() {
+    const int W = display.width();
+    char b[24];
+    float total = 0; int rssi = 0;
+    for (int i = 0; i < devCount; i++)
+      if (devs[i].st.valid) { total += devs[i].st.hashRate; rssi = devs[i].st.rssi; }
+
+    display.setFont(&FreeSansBold12pt7b);
+    display.setCursor(4, 18); display.print(fmtHash(total));
+    display.setFont(&FreeSans9pt7b);
+    snprintf(b, sizeof(b), "%d dev  %ddBm", devCount, rssi);
+    display.setCursor(W - textW(b) - 4, 16); display.print(b);
+    display.drawFastHLine(0, 22, W, GxEPD_BLACK);
+
+    int y = 38;
+    for (int i = 0; i < devCount && i < 6; i++) {
+      const Dev& d = devs[i];
+      String nm = d.st.hostname.length() ? d.st.hostname : String(d.ip);
+      display.setCursor(6, y); display.print(fitW(nm, 130));
+      if (d.st.valid) {
+        char hh[12];
+        if (d.st.hashRate >= 1000) snprintf(hh, sizeof(hh), "%.2fT", d.st.hashRate / 1000.0f);
+        else                       snprintf(hh, sizeof(hh), "%.0fG", d.st.hashRate);
+        display.setCursor(212 - textW(hh), y); display.print(hh);
+        snprintf(b, sizeof(b), "%.0fC", d.st.temp);
+        display.setCursor(W - textW(b) - 4, y); display.print(b);
+      } else {
+        display.setCursor(200, y); display.print("offline");
+      }
+      y += 15;
+    }
   }, true);
 }
 
 // ---- Bitaxe poll ---------------------------------------------------------
-bool fetchStats() {
-  if (WiFi.status() != WL_CONNECTED || strlen(bitaxeIp) == 0) return false;
+bool fetchStats(int idx) {
+  Dev& d = devs[idx];
+  if (WiFi.status() != WL_CONNECTED || strlen(d.ip) == 0) { d.st.valid = false; return false; }
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(5000);
-  String url = "http://" + String(bitaxeIp) + "/api/system/info";
-  if (!http.begin(client, url)) return false;
+  String url = "http://" + String(d.ip) + "/api/system/info";
+  if (!http.begin(client, url)) { d.st.valid = false; return false; }
   int code = http.GET();
   bool ok = false;
   if (code == 200) {
     DynamicJsonDocument doc(4096);
     if (!deserializeJson(doc, http.getString())) {
-      st.hostname       = doc["hostname"].as<String>();
-      st.hashRate       = doc["hashRate"].as<float>();
-      st.temp           = doc["temp"].as<float>();
-      st.vrTemp         = doc["vrTemp"].as<float>();
-      st.power          = doc["power"].as<float>();
-      st.frequency      = doc["frequency"].as<int>();
-      st.sharesAccepted = doc["sharesAccepted"].as<long>();
-      st.sharesRejected = doc["sharesRejected"].as<long>();
-      st.bestDiff       = doc["bestDiff"].as<String>();
-      st.uptimeSeconds  = doc["uptimeSeconds"].as<long>();
-      st.rssi           = WiFi.RSSI();
-      st.valid = true;
-      pushSample(st.hashRate, st.temp);
+      d.st.hostname       = doc["hostname"].as<String>();
+      d.st.hashRate       = doc["hashRate"].as<float>();
+      d.st.temp           = doc["temp"].as<float>();
+      d.st.vrTemp         = doc["vrTemp"].as<float>();
+      d.st.power          = doc["power"].as<float>();
+      d.st.frequency      = doc["frequency"].as<int>();
+      d.st.sharesAccepted = doc["sharesAccepted"].as<long>();
+      d.st.sharesRejected = doc["sharesRejected"].as<long>();
+      d.st.bestDiff       = doc["bestDiff"].as<String>();
+      d.st.uptimeSeconds  = doc["uptimeSeconds"].as<long>();
+      d.st.rssi           = WiFi.RSSI();
+      d.st.valid = true;
+      pushSample(d, d.st.hashRate, d.st.temp);
       ok = true;
     }
   }
+  if (!ok) d.st.valid = false;
   http.end();
   return ok;
+}
+
+// Poll every configured device; returns how many responded.
+int pollAll() {
+  int n = 0;
+  for (int i = 0; i < devCount; i++) if (fetchStats(i)) n++;
+  return n;
+}
+
+// Screen rotation: [overview] then each device's [graph][stats].
+int screen = 0;
+void drawCurrent() {
+  if (devCount == 0) { drawMessage("No devices", "add IPs in", "paper-display AP"); return; }
+  bool multi = devCount > 1;
+  int total = multi ? (1 + 2 * devCount) : 2;
+  int s = screen % total;
+  if (multi && s == 0) { drawOverview(); return; }
+  int idx = multi ? s - 1 : s;
+  int dev = idx / 2, sub = idx % 2;
+  if (dev >= devCount) dev = 0;
+  if (sub == 0) drawGraphView(devs[dev]); else drawStatsView(devs[dev]);
 }
 
 // ---- setup / loop --------------------------------------------------------
 void startPortal(bool onDemand) {
   WiFiManager wm;
   wm.setSaveConfigCallback(onSaveConfig);
-  WiFiManagerParameter pIp("bitaxe", "Bitaxe IP (e.g. 10.0.0.x)", bitaxeIp, sizeof(bitaxeIp) - 1);
+  WiFiManagerParameter pIp("bitaxe", "Bitaxe IPs (comma-separated)", ipList, sizeof(ipList) - 1);
   wm.addParameter(&pIp);
   wm.setConfigPortalTimeout(180);
 
   bool connected = onDemand ? wm.startConfigPortal("paper-display")
                             : wm.autoConnect("paper-display");
-  strlcpy(bitaxeIp, pIp.getValue(), sizeof(bitaxeIp));
+  strlcpy(ipList, pIp.getValue(), sizeof(ipList));
+  parseDevices(ipList);
   if (shouldSaveConfig) { saveConfig(); shouldSaveConfig = false; }
   if (!connected) { ESP.restart(); }
 }
@@ -417,33 +509,45 @@ void setup() {
   drawMessage("paper-display", "Starting up...", "");
 
   loadConfig();
+  parseDevices(ipList);
 
-  // If no Bitaxe IP yet, show setup hint before opening the portal.
-  if (strlen(bitaxeIp) == 0) {
+  // If no devices configured yet, show setup hint before opening the portal.
+  if (devCount == 0) {
     drawMessage("Setup needed", "Join WiFi AP:", "paper-display");
   }
   startPortal(false);                  // autoConnect: uses saved creds or portal
 
-  Serial.printf("[paper-display] wifi=%s ip=%s bitaxe=%s\n",
-                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), bitaxeIp);
+  Serial.printf("[paper-display] wifi=%s ip=%s devices=%d\n",
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), devCount);
 
-  if (fetchStats()) drawGraphView();
-  else drawMessage("Bitaxe offline", bitaxeIp, "retrying...");
+  pollAll();
+  drawCurrent();                       // first screen
+}
+
+// Serial config: type a comma-separated IP list (e.g. "10.0.0.231,10.0.0.240")
+// in the monitor to set devices on the fly; type "portal" to open WiFi setup.
+void handleSerial() {
+  if (!Serial.available()) return;
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  if (line.length() == 0) return;
+  if (line.equalsIgnoreCase("portal")) { startPortal(true); return; }
+  strlcpy(ipList, line.c_str(), sizeof(ipList));
+  parseDevices(ipList);
+  saveConfig();
+  Serial.printf("[paper-display] set %d device(s): %s\n", devCount, ipList);
+  screen = 0; pollAll(); drawCurrent();
 }
 
 uint32_t lastPoll = 0;
-int view = 0;                          // 0 = graph, 1 = stats
 void loop() {
+  handleSerial();
   if (millis() - lastPoll >= POLL_MS || lastPoll == 0) {
     lastPoll = millis();
-    if (fetchStats()) {
-      if (view == 0) drawGraphView(); else drawStatsView();
-      view ^= 1;                       // flip view each poll
-      Serial.printf("[paper-display] %.1f GH/s  %.1fC  %.1fW\n",
-                    st.hashRate, st.temp, st.power);
-    } else if (!st.valid) {
-      drawMessage("Bitaxe offline", bitaxeIp, "check IP / power");
-    }
+    int ok = pollAll();
+    drawCurrent();
+    screen++;                          // advance rotation each poll
+    Serial.printf("[paper-display] polled %d/%d devices ok\n", ok, devCount);
   }
   delay(200);
 }
