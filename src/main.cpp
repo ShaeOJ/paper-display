@@ -174,24 +174,56 @@ void drawMessage(const char* title, const char* line1, const char* line2) {
   }, true);
 }
 
-// e-paper partial refresh ghosts (old pixels remain faintly visible). Data only
-// changes once per poll, and a full refresh is now fast (~1s, BUSY disabled), so
-// full-refresh every update = crisp with no ghost. Raise FULL_EVERY (>1) to trade
-// a little ghosting for fewer full-refresh flashes.
-static const int FULL_EVERY = 1;
+// e-paper trade-off: a FULL refresh is crisp but blinks the whole panel; a
+// PARTIAL refresh is blink-free but leaves faint ghosting that builds up. So we
+// do partial updates every poll (smooth, no blink) and a full clean-up refresh
+// every FULL_EVERY polls (default 12 = ~6 min at 30s) to clear ghosting.
+// FULL_EVERY=1 => always full (no ghost, blinks every poll).
+static const int FULL_EVERY = 12;
 int drawCount = 0;
 
-// Draw the hashrate sparkline within [gx,gy,gw,gh]; auto-ranged min..max.
+// Draw the hashrate sparkline within [gx,gy,gw,gh] as a gradient-filled area
+// chart. True gradients aren't possible on 1-bit e-paper, so the fill under the
+// curve uses a 4x4 ordered (Bayer) dither whose density fades from dense at the
+// baseline to sparse near the line, with a crisp solid line drawn on top.
 void drawSparkline(int gx, int gy, int gw, int gh) {
-  display.drawFastHLine(gx, gy + gh, gw, GxEPD_BLACK);   // baseline axis
+  const int baseY = gy + gh;
+  display.drawFastHLine(gx, baseY, gw, GxEPD_BLACK);      // baseline axis
   if (histCount < 2) return;
+
   float mn = hist[0], mx = hist[0];
   for (int i = 1; i < histCount; i++) { mn = min(mn, hist[i]); mx = max(mx, hist[i]); }
   if (mx - mn < 1.0f) { mx = mn + 1.0f; }                // flat -> avoid /0
-  auto px = [&](int i) { return gx + (histCount == 1 ? 0 : i * (gw - 1) / (histCount - 1)); };
-  auto py = [&](int i) { return gy + gh - 1 - (int)((hist[i] - mn) / (mx - mn) * (gh - 1)); };
-  for (int i = 1; i < histCount; i++)
-    display.drawLine(px(i - 1), py(i - 1), px(i), py(i), GxEPD_BLACK);
+
+  static const uint8_t bayer[4][4] = {
+    { 0,  8,  2, 10}, {12,  4, 14,  6}, { 3, 11,  1,  9}, {15,  7, 13,  5}
+  };
+  // Hashrate value interpolated at a given pixel column (0..gw-1).
+  auto valAt = [&](int col) -> float {
+    if (gw <= 1) return hist[histCount - 1];
+    float f = (float)col * (histCount - 1) / (gw - 1);
+    int i0 = (int)f;
+    if (i0 >= histCount - 1) return hist[histCount - 1];
+    float fr = f - i0;
+    return hist[i0] * (1.0f - fr) + hist[i0 + 1] * fr;
+  };
+
+  int prevCy = -1;
+  for (int col = 0; col < gw; col++) {
+    int x = gx + col;
+    float v = valAt(col);
+    int cy = gy + gh - 1 - (int)((v - mn) / (mx - mn) * (gh - 1));
+    // gradient fill: dense (dark) at baseline, fading up toward the line
+    for (int y = cy; y < baseY; y++) {
+      float t = (float)(baseY - y) / (float)gh;          // 0 at baseline, 1 at top
+      uint8_t level = (uint8_t)((1.0f - t) * 16.0f);     // 16=solid .. 0=empty
+      if (bayer[x & 3][y & 3] < level) display.drawPixel(x, y, GxEPD_BLACK);
+    }
+    // crisp line on top, connected across columns
+    if (prevCy >= 0) display.drawLine(x - 1, prevCy, x, cy, GxEPD_BLACK);
+    else             display.drawPixel(x, cy, GxEPD_BLACK);
+    prevCy = cy;
+  }
 }
 
 void drawStats() {
