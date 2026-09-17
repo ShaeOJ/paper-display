@@ -259,6 +259,32 @@ void drawChart(int ax, int ay, int aw, int ah) {
   }
 }
 
+// 8x8 monochrome stat icons (MSB = leftmost pixel).
+static const uint8_t ic_thermo[] PROGMEM = {  // temp
+  0b00011000, 0b00100100, 0b00100100, 0b00100100,
+  0b00111100, 0b01111110, 0b01111110, 0b00111100 };
+static const uint8_t ic_chip[]   PROGMEM = {  // VR temp
+  0b00100100, 0b01111110, 0b11111111, 0b10111101,
+  0b10111101, 0b11111111, 0b01111110, 0b00100100 };
+static const uint8_t ic_bolt[]   PROGMEM = {  // power
+  0b00011100, 0b00110000, 0b01100000, 0b01111100,
+  0b00001100, 0b00011000, 0b00110000, 0b01100000 };
+static const uint8_t ic_leaf[]   PROGMEM = {  // efficiency
+  0b00000110, 0b00011110, 0b00111110, 0b01111100,
+  0b11111000, 0b01110000, 0b00101000, 0b00000100 };
+static const uint8_t ic_wave[]   PROGMEM = {  // frequency
+  0b00000000, 0b00000000, 0b01100110, 0b10011001,
+  0b00000000, 0b01100110, 0b10011001, 0b00000000 };
+static const uint8_t ic_check[]  PROGMEM = {  // shares
+  0b00000000, 0b00000011, 0b00000110, 0b00001100,
+  0b11011000, 0b01110000, 0b00100000, 0b00000000 };
+static const uint8_t ic_star[]   PROGMEM = {  // best diff
+  0b00011000, 0b00011000, 0b11111111, 0b01111110,
+  0b00111100, 0b01100110, 0b01000010, 0b00000000 };
+static const uint8_t ic_clock[]  PROGMEM = {  // uptime
+  0b00111100, 0b01000010, 0b10010001, 0b10011001,
+  0b10001101, 0b10000001, 0b01000010, 0b00111100 };
+
 void drawStats() {
   bool full = (drawCount % FULL_EVERY == 0);
   drawCount++;
@@ -276,22 +302,25 @@ void drawStats() {
     // --- hashrate chart with X/Y gridlines + labels ---
     drawChart(2, 20, W - 4, 46);       // area y20..66 (plot + axis labels)
 
-    // --- compact stats grid: tiny built-in font, 2 columns x 4 rows ---
+    // --- compact stats grid: 8x8 icon + value, 2 columns x 4 rows ---
     display.setFont(NULL);
     display.setTextSize(1);
     const int LX = 4, RX = 152;
     const int ys[4] = {74, 88, 102, 116};
-    auto cell = [&](int x, int y, const String& s) { display.setCursor(x, y); display.print(s); };
+    auto row = [&](int x, int y, const uint8_t* ic, const String& val) {
+      display.drawBitmap(x, y, ic, 8, 8, GxEPD_BLACK);
+      display.setCursor(x + 11, y); display.print(val);
+    };
 
-    snprintf(b, sizeof(b), "Temp %.1fC", st.temp);       cell(LX, ys[0], b);
-    snprintf(b, sizeof(b), "Pwr  %.1fW", st.power);      cell(RX, ys[0], b);
-    snprintf(b, sizeof(b), "VR   %.0fC", st.vrTemp);     cell(LX, ys[1], b);
-    snprintf(b, sizeof(b), "Eff  %d J/TH", effJTH());    cell(RX, ys[1], b);
-    snprintf(b, sizeof(b), "Freq %dMHz", st.frequency);  cell(LX, ys[2], b);
-    snprintf(b, sizeof(b), "A/R  %ld/%ld",
-             st.sharesAccepted, st.sharesRejected);      cell(RX, ys[2], b);
-    cell(LX, ys[3], "Best " + fmtDiff(st.bestDiff));
-    cell(RX, ys[3], "Up   " + fmtUptime(st.uptimeSeconds));
+    snprintf(b, sizeof(b), "%.1fC", st.temp);        row(LX, ys[0], ic_thermo, b);
+    snprintf(b, sizeof(b), "%.1fW", st.power);       row(RX, ys[0], ic_bolt,   b);
+    snprintf(b, sizeof(b), "%.0fC", st.vrTemp);      row(LX, ys[1], ic_chip,   b);
+    snprintf(b, sizeof(b), "%d J/TH", effJTH());     row(RX, ys[1], ic_leaf,   b);
+    snprintf(b, sizeof(b), "%dMHz", st.frequency);   row(LX, ys[2], ic_wave,   b);
+    snprintf(b, sizeof(b), "%ld/%ld",
+             st.sharesAccepted, st.sharesRejected);  row(RX, ys[2], ic_check,  b);
+    row(LX, ys[3], ic_star,  fmtDiff(st.bestDiff));
+    row(RX, ys[3], ic_clock, fmtUptime(st.uptimeSeconds));
   }, full);
 }
 
