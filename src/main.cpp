@@ -174,55 +174,76 @@ void drawMessage(const char* title, const char* line1, const char* line2) {
   }, true);
 }
 
-// e-paper trade-off: a FULL refresh is crisp but blinks the whole panel; a
-// PARTIAL refresh is blink-free but leaves faint ghosting that builds up. So we
-// do partial updates every poll (smooth, no blink) and a full clean-up refresh
-// every FULL_EVERY polls (default 12 = ~6 min at 30s) to clear ghosting.
-// FULL_EVERY=1 => always full (no ghost, blinks every poll).
-static const int FULL_EVERY = 12;
+// Fast partial refresh every poll (blink-free, no visible ghosting with the
+// chart + small-font layout). A full clean-up refresh runs rarely (every
+// FULL_EVERY polls = ~30 min at 30s) purely as insurance against long-term
+// ghost drift. FULL_EVERY=1 => always full (crisp but blinks every poll).
+static const int FULL_EVERY = 60;
 int drawCount = 0;
 
-// Draw the hashrate sparkline within [gx,gy,gw,gh] as a gradient-filled area
-// chart. True gradients aren't possible on 1-bit e-paper, so the fill under the
-// curve uses a 4x4 ordered (Bayer) dither whose density fades from dense at the
-// baseline to sparse near the line, with a crisp solid line drawn on top.
-void drawSparkline(int gx, int gy, int gw, int gh) {
-  const int baseY = gy + gh;
-  display.drawFastHLine(gx, baseY, gw, GxEPD_BLACK);      // baseline axis
-  if (histCount < 2) return;
+// Short label for a hashrate value on the Y axis (e.g. "512" GH, "1.2T").
+String chartVal(float gh) {
+  char b[10];
+  if (gh >= 1000.0f) snprintf(b, sizeof(b), "%.1fT", gh / 1000.0f);
+  else               snprintf(b, sizeof(b), "%.0f", gh);
+  return String(b);
+}
 
-  float mn = hist[0], mx = hist[0];
-  for (int i = 1; i < histCount; i++) { mn = min(mn, hist[i]); mx = max(mx, hist[i]); }
-  if (mx - mn < 1.0f) { mx = mn + 1.0f; }                // flat -> avoid /0
+// Draw the hashrate history as a line chart with dynamic X (time) / Y (hashrate)
+// gridlines and axis labels inside the area [ax,ay,aw,ah].
+void drawChart(int ax, int ay, int aw, int ah) {
+  const int GUT  = 24;   // left gutter for Y (hashrate) labels
+  const int XLAB = 9;    // bottom strip for X (time) labels
+  const int px = ax + GUT, py = ay, pw = aw - GUT, ph = ah - XLAB;
+  const int baseY = py + ph, rightX = px + pw - 1;
+  const int pollS = POLL_MS / 1000;
 
-  static const uint8_t bayer[4][4] = {
-    { 0,  8,  2, 10}, {12,  4, 14,  6}, { 3, 11,  1,  9}, {15,  7, 13,  5}
-  };
-  // Hashrate value interpolated at a given pixel column (0..gw-1).
-  auto valAt = [&](int col) -> float {
-    if (gw <= 1) return hist[histCount - 1];
-    float f = (float)col * (histCount - 1) / (gw - 1);
-    int i0 = (int)f;
-    if (i0 >= histCount - 1) return hist[histCount - 1];
-    float fr = f - i0;
-    return hist[i0] * (1.0f - fr) + hist[i0 + 1] * fr;
-  };
+  display.setFont(NULL);
+  display.setTextSize(1);
+  auto dotH = [&](int x, int y, int w) { for (int i = 0; i < w; i += 3) display.drawPixel(x + i, y, GxEPD_BLACK); };
+  auto dotV = [&](int x, int y, int h) { for (int i = 0; i < h; i += 3) display.drawPixel(x, y + i, GxEPD_BLACK); };
 
-  int prevCy = -1;
-  for (int col = 0; col < gw; col++) {
-    int x = gx + col;
-    float v = valAt(col);
-    int cy = gy + gh - 1 - (int)((v - mn) / (mx - mn) * (gh - 1));
-    // gradient fill: dense (dark) at baseline, fading up toward the line
-    for (int y = cy; y < baseY; y++) {
-      float t = (float)(baseY - y) / (float)gh;          // 0 at baseline, 1 at top
-      uint8_t level = (uint8_t)((1.0f - t) * 16.0f);     // 16=solid .. 0=empty
-      if (bayer[x & 3][y & 3] < level) display.drawPixel(x, y, GxEPD_BLACK);
-    }
-    // crisp line on top, connected across columns
-    if (prevCy >= 0) display.drawLine(x - 1, prevCy, x, cy, GxEPD_BLACK);
-    else             display.drawPixel(x, cy, GxEPD_BLACK);
-    prevCy = cy;
+  // axes
+  display.drawFastVLine(px, py, ph, GxEPD_BLACK);
+  display.drawFastHLine(px, baseY, pw, GxEPD_BLACK);
+
+  float mn = 0, mx = 1;
+  if (histCount >= 1) {
+    mn = mx = hist[0];
+    for (int i = 1; i < histCount; i++) { mn = min(mn, hist[i]); mx = max(mx, hist[i]); }
+    if (mx - mn < 1.0f) { mx += 1.0f; }
+  }
+
+  // Y gridlines + labels at min / mid / max
+  for (int k = 0; k <= 2; k++) {
+    float frac = k / 2.0f;
+    int yy = baseY - (int)(frac * (ph - 1));
+    if (k > 0) dotH(px + 1, yy, pw - 1);
+    String lab = chartVal(mn + (mx - mn) * frac);
+    display.setCursor(px - 2 - lab.length() * 6, yy - 3);
+    display.print(lab);
+  }
+
+  // X gridlines + time-ago labels at oldest / mid / now
+  int spanS = (histCount > 1) ? (histCount - 1) * pollS : 0;
+  for (int k = 0; k <= 2; k++) {
+    float frac = k / 2.0f;                       // 0=oldest(left) .. 1=now(right)
+    int xx = px + (int)(frac * (pw - 1));
+    if (k < 2) dotV(xx, py, ph);
+    int agoS = (int)((1.0f - frac) * spanS);
+    String lab = (k == 2) ? String("now") : String("-") + String((agoS + 30) / 60) + "m";
+    int lw = lab.length() * 6, lx = xx - lw / 2;
+    lx = max(px, min(lx, rightX - lw));
+    display.setCursor(lx, baseY + 2);
+    display.print(lab);
+  }
+
+  // the hashrate line
+  if (histCount >= 2) {
+    auto X = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
+    auto Y = [&](int i) { return baseY - (int)((hist[i] - mn) / (mx - mn) * (ph - 1)); };
+    for (int i = 1; i < histCount; i++)
+      display.drawLine(X(i - 1), Y(i - 1), X(i), Y(i), GxEPD_BLACK);
   }
 }
 
@@ -240,14 +261,14 @@ void drawStats() {
     display.setFont(&FreeSans9pt7b);
     display.setCursor(W - textW(b) - 4, 15); display.print(b);
 
-    // --- sparkline (hashrate history) ---
-    drawSparkline(3, 22, W - 6, 44);   // y 22..66
+    // --- hashrate chart with X/Y gridlines + labels ---
+    drawChart(2, 20, W - 4, 46);       // area y20..66 (plot + axis labels)
 
     // --- compact stats grid: tiny built-in font, 2 columns x 4 rows ---
     display.setFont(NULL);
     display.setTextSize(1);
     const int LX = 4, RX = 152;
-    const int ys[4] = {78, 90, 102, 114};
+    const int ys[4] = {74, 88, 102, 116};
     auto cell = [&](int x, int y, const String& s) { display.setCursor(x, y); display.print(s); };
 
     snprintf(b, sizeof(b), "Temp %.1fC", st.temp);       cell(LX, ys[0], b);
