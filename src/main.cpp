@@ -19,7 +19,6 @@
 #include <ArduinoJson.h>          // v6
 
 #include <GxEPD2_BW.h>
-#include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 
@@ -41,7 +40,7 @@ GxEPD2_BW<GxEPD2_290_T94_V2, GxEPD2_290_T94_V2::HEIGHT>
 
 // ---- config --------------------------------------------------------------
 static const char* CFG_PATH   = "/config.json";
-static const uint32_t POLL_MS = 30000;          // refresh cadence
+static const uint32_t POLL_MS = 60000;          // poll + refresh cadence
 char bitaxeIp[40] = "";
 bool shouldSaveConfig = false;
 
@@ -174,11 +173,12 @@ void drawMessage(const char* title, const char* line1, const char* line2) {
   }, true);
 }
 
-// Fast partial refresh every poll (blink-free, no visible ghosting with the
-// chart + small-font layout). A full clean-up refresh runs rarely (every
-// FULL_EVERY polls = ~30 min at 30s) purely as insurance against long-term
-// ghost drift. FULL_EVERY=1 => always full (crisp but blinks every poll).
-static const int FULL_EVERY = 60;
+// e-paper has no ghost-free fast mode: full refresh = zero ghost but a brief
+// blink; partial = blink-free but ghosts. Ghost-free wins here, so full refresh
+// every update and a slower poll (60s, see POLL_MS) keeps the blink infrequent.
+// Set FULL_EVERY > 1 to make most updates fast partial (blink-free) if you'd
+// rather trade a little ghosting for no blink.
+static const int FULL_EVERY = 1;
 int drawCount = 0;
 
 // Short label for a hashrate value on the Y axis (e.g. "512" GH, "1.2T").
@@ -207,10 +207,19 @@ void drawChart(int ax, int ay, int aw, int ah) {
   display.drawFastVLine(px, py, ph, GxEPD_BLACK);
   display.drawFastHLine(px, baseY, pw, GxEPD_BLACK);
 
+  // Smoothed sample (centered moving average) so the line rounds off spikes.
+  auto smooth = [&](int i) -> float {
+    const int w = 2;                 // +/- 2 = 5-point average
+    float s = 0; int n = 0;
+    for (int j = i - w; j <= i + w; j++)
+      if (j >= 0 && j < histCount) { s += hist[j]; n++; }
+    return n ? s / n : hist[i];
+  };
+
   float mn = 0, mx = 1;
   if (histCount >= 1) {
-    mn = mx = hist[0];
-    for (int i = 1; i < histCount; i++) { mn = min(mn, hist[i]); mx = max(mx, hist[i]); }
+    mn = mx = smooth(0);
+    for (int i = 1; i < histCount; i++) { float v = smooth(i); mn = min(mn, v); mx = max(mx, v); }
     if (mx - mn < 1.0f) { mx += 1.0f; }
   }
 
@@ -238,10 +247,10 @@ void drawChart(int ax, int ay, int aw, int ah) {
     display.print(lab);
   }
 
-  // the hashrate line
+  // the smoothed hashrate line
   if (histCount >= 2) {
     auto X = [&](int i) { return px + i * (pw - 1) / (histCount - 1); };
-    auto Y = [&](int i) { return baseY - (int)((hist[i] - mn) / (mx - mn) * (ph - 1)); };
+    auto Y = [&](int i) { return baseY - (int)((smooth(i) - mn) / (mx - mn) * (ph - 1)); };
     for (int i = 1; i < histCount; i++)
       display.drawLine(X(i - 1), Y(i - 1), X(i), Y(i), GxEPD_BLACK);
   }
@@ -254,12 +263,12 @@ void drawStats() {
     const int W = display.width();     // 296
     char b[28];
 
-    // --- header: current hashrate (left, bold) + RSSI (right) ---
-    display.setFont(&FreeSansBold12pt7b);
-    display.setCursor(4, 17); display.print(fmtHash(st.hashRate));
+    // --- header: current hashrate (left) + RSSI (right) ---
+    display.setFont(&FreeSansBold9pt7b);
+    display.setCursor(4, 14); display.print(fmtHash(st.hashRate));
     snprintf(b, sizeof(b), "%d dBm", st.rssi);
     display.setFont(&FreeSans9pt7b);
-    display.setCursor(W - textW(b) - 4, 15); display.print(b);
+    display.setCursor(W - textW(b) - 4, 14); display.print(b);
 
     // --- hashrate chart with X/Y gridlines + labels ---
     drawChart(2, 20, W - 4, 46);       // area y20..66 (plot + axis labels)
