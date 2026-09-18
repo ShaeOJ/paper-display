@@ -432,9 +432,9 @@ void drawOverview() {
     display.setCursor(198, 39); display.print(b);
     display.drawFastHLine(0, 46, W, GxEPD_BLACK);
 
-    // device list
-    int y = 58;
-    for (int i = 0; i < devCount && i < 6; i++) {
+    // device list (roomier gap below the totals divider)
+    int y = 66;
+    for (int i = 0; i < devCount && i < 5; i++) {
       const Dev& d = devs[i];
       String nm = d.st.hostname.length() ? d.st.hostname : String(d.ip);
       display.setCursor(6, y); display.print(fitW(nm, 130));
@@ -448,7 +448,7 @@ void drawOverview() {
       } else {
         display.setCursor(200, y); display.print("offline");
       }
-      y += 13;
+      y += 14;
     }
   }, true);
 }
