@@ -488,8 +488,14 @@ bool fetchStats(int idx) {
   int code = http.GET();
   bool ok = false;
   if (code == 200) {
-    DynamicJsonDocument doc(4096);
-    if (!deserializeJson(doc, http.getString())) {
+    // Only extract the fields we use, streamed from the socket, so a large
+    // AxeOS response (varies a lot by firmware) never overflows the buffer.
+    StaticJsonDocument<256> filter;
+    for (const char* k : {"hostname", "hashRate", "temp", "vrTemp", "power", "frequency",
+                          "sharesAccepted", "sharesRejected", "bestDiff", "uptimeSeconds"})
+      filter[k] = true;
+    DynamicJsonDocument doc(1024);
+    if (!deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter))) {
       d.st.hostname       = doc["hostname"].as<String>();
       d.st.hashRate       = doc["hashRate"].as<float>();
       d.st.temp           = doc["temp"].as<float>();
