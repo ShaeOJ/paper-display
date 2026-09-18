@@ -566,10 +566,7 @@ String webPage() {
   h += "<div class=card><b>WiFi:</b> " + WiFi.SSID() +
        "<br><span class=muted>" + WiFi.localIP().toString() + " &middot; " +
        String(WiFi.RSSI()) + " dBm</span></div>";
-  h += F("<div class=card><form method=POST action=/save><b>Bitaxe IPs</b> "
-         "<span class=muted>(comma-separated, up to 6)</span><br>");
-  h += "<input type=text name=ips value='" + String(ipList) + "'>";
-  h += F("<button type=submit>Save devices</button></form>");
+  h += F("<div class=card><b>Devices</b> <span class=muted>(up to 6)</span>");
   for (int i = 0; i < devCount; i++) {
     Dev& d = devs[i];
     h += "<div class=row>" + (d.st.hostname.length() ? d.st.hostname : String(d.ip)) + " &middot; ";
@@ -583,7 +580,9 @@ String webPage() {
          "<button class=b2 style='padding:2px 8px;margin-left:8px;font-size:12px'>&times;</button>"
          "</form></div>";
   }
-  h += F("</div>");
+  h += F("<form method=POST action=/add style='margin-top:12px'>"
+         "<input type=text name=ip placeholder='add IP, e.g. 10.0.0.45'>"
+         "<button type=submit>Add device</button></form></div>");
   h += F("<div class=card><b>WiFi settings</b><br>"
          "<span class=muted>Opens the setup hotspot to change WiFi.</span><br>"
          "<form method=POST action=/wifi onsubmit=\"return confirm('Open WiFi setup AP? "
@@ -596,29 +595,56 @@ String webPage() {
 }
 
 void handleRoot()  { server.send(200, "text/html", webPage()); }
-void handleSave() {
-  if (server.hasArg("ips")) {
-    String v = server.arg("ips"); v.trim();
-    strlcpy(ipList, v.c_str(), sizeof(ipList));
-    parseDevices(ipList);
+// Rebuild the persisted ipList string from the current device array.
+void syncIpList() {
+  String s = "";
+  for (int i = 0; i < devCount; i++) { if (s.length()) s += ","; s += devs[i].ip; }
+  strlcpy(ipList, s.c_str(), sizeof(ipList));
+}
+
+// Append one or more IPs to the device list WITHOUT disturbing existing
+// devices (so their graph history is preserved). Skips dups / bad / over-limit.
+void handleAdd() {
+  if (server.hasArg("ip")) {
+    String add = server.arg("ip"); add.trim();
+    int start = 0;
+    while (start <= (int)add.length()) {
+      int c = add.indexOf(',', start);
+      if (c < 0) c = add.length();
+      String tok = add.substring(start, c); tok.trim();
+      if (tok.length() && tok.indexOf('.') >= 0 && devCount < MAX_DEV) {
+        bool dup = false;
+        for (int i = 0; i < devCount; i++) if (String(devs[i].ip) == tok) dup = true;
+        if (!dup) {
+          Dev& d = devs[devCount];
+          strlcpy(d.ip, tok.c_str(), sizeof(d.ip));
+          d.histCount = 0; d.st = Stats();
+          devCount++;
+        }
+      }
+      start = c + 1;
+    }
+    syncIpList();
     saveConfig();
     screen = 0; pollAll();
   }
   server.sendHeader("Location", "/");
-  server.send(303, "text/plain", "saved");
+  server.send(303, "text/plain", "added");
   drawCurrent();
 }
+
+// Remove a device by IP, shifting the array in place (keeps others' history).
 void handleRemove() {
   if (server.hasArg("ip")) {
     String target = server.arg("ip");
-    String rebuilt = "";
-    for (int i = 0; i < devCount; i++) {
-      if (String(devs[i].ip) == target) continue;    // drop the matching device
-      if (rebuilt.length()) rebuilt += ",";
-      rebuilt += devs[i].ip;
+    int w = 0;
+    for (int r = 0; r < devCount; r++) {
+      if (String(devs[r].ip) == target) continue;     // drop the match
+      if (w != r) devs[w] = devs[r];
+      w++;
     }
-    strlcpy(ipList, rebuilt.c_str(), sizeof(ipList));
-    parseDevices(ipList);
+    devCount = w;
+    syncIpList();
     saveConfig();
     screen = 0; pollAll();
   }
@@ -638,7 +664,7 @@ void handleReboot() {
 }
 void setupWeb() {
   server.on("/",       HTTP_GET,  handleRoot);
-  server.on("/save",   HTTP_POST, handleSave);
+  server.on("/add",    HTTP_POST, handleAdd);
   server.on("/remove", HTTP_POST, handleRemove);
   server.on("/wifi",   HTTP_POST, handleWifi);
   server.on("/reboot", HTTP_POST, handleReboot);

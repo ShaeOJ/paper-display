@@ -51,7 +51,8 @@ On first boot (or if WiFi fails) it opens a captive-portal AP named **`paper-dis
 After setup, the display runs a small web UI on its LAN IP (shown as `cfg <ip>`
 on the stats screen) and at **http://paper-display.local/**. From there you can:
 
-- add / remove Bitaxe IPs
+- **add** a device (append field) or **remove** one per row (existing devices
+  keep their graph history)
 - see each device's live status (hashrate, temp, online/offline)
 - **Reconfigure WiFi** (reopens the `paper-display` setup hotspot)
 - reboot
