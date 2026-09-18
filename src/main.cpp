@@ -404,10 +404,14 @@ void drawOverview() {
   renderFrame([&]() {
     const int W = display.width();
     char b[24];
-    float totalH = 0, totalP = 0;
+    float totalH = 0, totalP = 0, totalT = 0; int nOn = 0;
     for (int i = 0; i < devCount; i++)
-      if (devs[i].st.valid) { totalH += devs[i].st.hashRate; totalP += devs[i].st.power; }
+      if (devs[i].st.valid) {
+        totalH += devs[i].st.hashRate; totalP += devs[i].st.power;
+        totalT += devs[i].st.temp; nOn++;
+      }
     int totalEff = (totalH > 0) ? (int)lroundf(totalP / (totalH / 1000.0f)) : 0;
+    int avgT     = (nOn > 0) ? (int)lroundf(totalT / nOn) : 0;
 
     // header: total hashrate (left) + device count (right)
     display.setFont(&FreeSansBold12pt7b);
@@ -416,13 +420,16 @@ void drawOverview() {
     snprintf(b, sizeof(b), "%d dev", devCount);
     display.setCursor(W - textW(b) - 4, 16); display.print(b);
 
-    // totals row: power + efficiency with icons
-    display.drawBitmap(6, 26, ic16_bolt, 16, 16, GxEPD_BLACK);
-    snprintf(b, sizeof(b), "%.0f W", totalP);
-    display.setCursor(26, 39); display.print(b);
-    display.drawBitmap(150, 26, ic16_leaf, 16, 16, GxEPD_BLACK);
+    // totals row: power, avg temp, efficiency (with icons)
+    display.drawBitmap(4, 26, ic16_bolt, 16, 16, GxEPD_BLACK);
+    snprintf(b, sizeof(b), "%.0fW", totalP);
+    display.setCursor(22, 39); display.print(b);
+    display.drawBitmap(100, 26, ic16_thermo, 16, 16, GxEPD_BLACK);
+    snprintf(b, sizeof(b), "%dC", avgT);
+    display.setCursor(118, 39); display.print(b);
+    display.drawBitmap(180, 26, ic16_leaf, 16, 16, GxEPD_BLACK);
     snprintf(b, sizeof(b), "%d J/TH", totalEff);
-    display.setCursor(170, 39); display.print(b);
+    display.setCursor(198, 39); display.print(b);
     display.drawFastHLine(0, 46, W, GxEPD_BLACK);
 
     // device list
