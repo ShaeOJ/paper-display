@@ -404,18 +404,29 @@ void drawOverview() {
   renderFrame([&]() {
     const int W = display.width();
     char b[24];
-    float total = 0; int rssi = 0;
+    float totalH = 0, totalP = 0;
     for (int i = 0; i < devCount; i++)
-      if (devs[i].st.valid) { total += devs[i].st.hashRate; rssi = devs[i].st.rssi; }
+      if (devs[i].st.valid) { totalH += devs[i].st.hashRate; totalP += devs[i].st.power; }
+    int totalEff = (totalH > 0) ? (int)lroundf(totalP / (totalH / 1000.0f)) : 0;
 
+    // header: total hashrate (left) + device count (right)
     display.setFont(&FreeSansBold12pt7b);
-    display.setCursor(4, 18); display.print(fmtHash(total));
+    display.setCursor(4, 18); display.print(fmtHash(totalH));
     display.setFont(&FreeSans9pt7b);
-    snprintf(b, sizeof(b), "%d dev  %ddBm", devCount, rssi);
+    snprintf(b, sizeof(b), "%d dev", devCount);
     display.setCursor(W - textW(b) - 4, 16); display.print(b);
-    display.drawFastHLine(0, 22, W, GxEPD_BLACK);
 
-    int y = 38;
+    // totals row: power + efficiency with icons
+    display.drawBitmap(6, 26, ic16_bolt, 16, 16, GxEPD_BLACK);
+    snprintf(b, sizeof(b), "%.0f W", totalP);
+    display.setCursor(26, 39); display.print(b);
+    display.drawBitmap(150, 26, ic16_leaf, 16, 16, GxEPD_BLACK);
+    snprintf(b, sizeof(b), "%d J/TH", totalEff);
+    display.setCursor(170, 39); display.print(b);
+    display.drawFastHLine(0, 46, W, GxEPD_BLACK);
+
+    // device list
+    int y = 58;
     for (int i = 0; i < devCount && i < 6; i++) {
       const Dev& d = devs[i];
       String nm = d.st.hostname.length() ? d.st.hostname : String(d.ip);
@@ -430,7 +441,7 @@ void drawOverview() {
       } else {
         display.setCursor(200, y); display.print("offline");
       }
-      y += 15;
+      y += 13;
     }
   }, true);
 }
